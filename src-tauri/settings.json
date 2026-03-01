@@ -1,0 +1,14 @@
+{
+  "shortcuts": {
+    "showHideWindow": "CommandOrControl+Shift+Alt+digit0",
+    "toggleFloating": "CommandOrControl+Shift+F"
+  },
+  "window": {
+    "x": 100,
+    "y": 100,
+    "width": 600,
+    "height": 700
+  },
+  "memo": "",
+  "memo_height": 80
+}

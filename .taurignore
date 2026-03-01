@@ -1,0 +1,5 @@
+# Ignore data directory to prevent Tauri dev hot-reload when todos change
+data/
+todos.json
+settings.json
+*.backup
