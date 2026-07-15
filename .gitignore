@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+.claude/settings.local.json
+*.bak
+*_patch.txt
 
 # Editor directories and files
 .vscode/*
@@ -22,3 +25,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Rust/Tauri build artifacts
+src-tauri/target
+src-tauri/icons/Cargo.lock

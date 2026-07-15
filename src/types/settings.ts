@@ -1,6 +1,5 @@
 export interface ShortcutConfig {
   showHideWindow: string;
-  toggleFloating: string;
 }
 
 export interface WindowState {
@@ -15,6 +14,12 @@ export interface Settings {
   window?: WindowState;
   memo: string;
   memoHeight: number;
+  autoLaunch: boolean;
+  priorityColors?: {
+    1?: string;
+    2?: string;
+    3?: string;
+  };
 }
 
-export type ShortcutAction = 'showHideWindow' | 'toggleFloating';
+export type ShortcutAction = 'showHideWindow';

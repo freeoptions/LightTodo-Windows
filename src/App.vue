@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { onMounted, onUnmounted, ref, computed, nextTick } from 'vue';
 import TodoList from './components/TodoList.vue';
 import Settings from './components/Settings.vue';
@@ -18,12 +18,10 @@ const {
   error,
   loadTodos,
   setViewDate,
-  addTodo,
   toggleTodo,
   deleteTodo,
   toggleExpand,
   completeAllSubtodos,
-  completeEarly,
   toggleDisable,
   progress,
   progressText
@@ -33,17 +31,21 @@ const {
 const showModal = ref(false);
 const editingTodoId = ref<string | null>(null);
 const newTodoContent = ref('');
-const newTodoRepeatMode = ref<RepeatMode>('daily'); // 默认每天重复
-const newTodoWeekdays = ref<number[]>([]); // 选中的周几 (1-7, 周一=1, 周日=7)
-const newTodoSpecificDates = ref<string[]>([]); // 选中的指定日期
+const newTodoRepeatMode = ref<RepeatMode>('daily'); // 榛樿姣忓ぉ閲嶅
+const newTodoWeekdays = ref<number[]>([]); // 閫変腑鐨勫懆鍑?(1-7, 鍛ㄤ竴=1, 鍛ㄦ棩=7)
+const newTodoSpecificDates = ref<string[]>([]); // 閫変腑鐨勬寚瀹氭棩鏈?
+const newSubtodoCycleEnabled = ref(false);
+const newSubtodoCycleStartDate = ref('');
+const newSubtodoCycleActiveDays = ref(7);
+const newSubtodoCycleIntervalWeeks = ref(4);
 const weekdayOptions = [
-  { value: 1, label: '周一' },
-  { value: 2, label: '周二' },
-  { value: 3, label: '周三' },
-  { value: 4, label: '周四' },
-  { value: 5, label: '周五' },
-  { value: 6, label: '周六' },
-  { value: 7, label: '周日' },
+  { value: 1, label: '鍛ㄤ竴' },
+  { value: 2, label: '鍛ㄤ簩' },
+  { value: 3, label: '鍛ㄤ笁' },
+  { value: 4, label: '鍛ㄥ洓' },
+  { value: 5, label: '鍛ㄤ簲' },
+  { value: 6, label: '鍛ㄥ叚' },
+  { value: 7, label: '鍛ㄦ棩' },
 ];
 
 // Delete confirmation state
@@ -57,18 +59,19 @@ const addingSubtodoForParentId = ref<string | null>(null);
 const editingSubtodo = ref(false); // true if editing a subtodo (not parent)
 
 // Subtodos in the modal (for creating/editing parent with subtodos)
-const modalSubtodos = ref<Array<{ id: string; content: string }>>([]);
+const modalSubtodos = ref<Array<{
+  id: string;
+  content: string;
+  cycleStartDate?: string;
+  cycleActiveDays?: number;
+  cycleIntervalWeeks?: number;
+}>>([]);
 const newSubtodoContent = ref('');
 
 // Parent todo completion confirmation state
 const showParentCompleteConfirm = ref(false);
 const parentCompleteId = ref<string | null>(null);
 const parentCompleteContent = ref('');
-
-// Complete early confirmation state
-const showCompleteEarlyConfirm = ref(false);
-const completeEarlyId = ref<string | null>(null);
-const completeEarlyContent = ref('');
 
 // Settings state
 const showSettings = ref(false);
@@ -158,7 +161,7 @@ const weekDates = computed(() => {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     const isoDate = `${year}-${month}-${day}`;
-    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    const weekdays = ['鍛ㄦ棩', '鍛ㄤ竴', '鍛ㄤ簩', '鍛ㄤ笁', '鍛ㄥ洓', '鍛ㄤ簲', '鍛ㄥ叚'];
     const weekday = weekdays[date.getDay()];
 
     // Check if this date is in the past (before today)
@@ -234,12 +237,30 @@ onMounted(async () => {
   });
 });
 
-const handleAdd = async (content: string, repeatMode: RepeatMode, weekdays?: string, specificDates?: string, parentId?: string) => {
-  try {
-    await addTodo(content, repeatMode, weekdays, specificDates, parentId);
-  } catch (e) {
-    console.error('Failed to add todo:', e);
+const resetSubtodoCycleForm = () => {
+  newSubtodoCycleEnabled.value = false;
+  newSubtodoCycleStartDate.value = '';
+  newSubtodoCycleActiveDays.value = 7;
+  newSubtodoCycleIntervalWeeks.value = 4;
+};
+
+const getSubtodoCyclePayload = () => {
+  if (!newSubtodoCycleEnabled.value || !newSubtodoCycleStartDate.value) {
+    return {
+      cycleStartDate: null,
+      cycleActiveDays: null,
+      cycleIntervalWeeks: null,
+    };
   }
+
+  const intervalWeeks = Math.max(1, Math.min(52, Math.trunc(Number(newSubtodoCycleIntervalWeeks.value) || 4)));
+  const activeDays = Math.max(1, Math.min(intervalWeeks * 7, Math.trunc(Number(newSubtodoCycleActiveDays.value) || 7)));
+
+  return {
+    cycleStartDate: newSubtodoCycleStartDate.value,
+    cycleActiveDays: activeDays,
+    cycleIntervalWeeks: intervalWeeks,
+  };
 };
 
 // Open modal for adding
@@ -251,6 +272,7 @@ const openAddModal = async () => {
   newTodoRepeatMode.value = 'daily';
   newTodoWeekdays.value = [];
   newTodoSpecificDates.value = [];
+  resetSubtodoCycleForm();
   modalSubtodos.value = [];
   newSubtodoContent.value = '';
   showModal.value = true;
@@ -275,13 +297,13 @@ const openEditModal = async (id: string) => {
     editingSubtodo.value = isSubtodo;
     console.log('=== [EDIT] parentId:', todo.parentId, 'Is subtodo:', isSubtodo);
 
-    // 先隐藏模态框，确保 key 从 'new' 开始
+    // 鍏堥殣钘忔ā鎬佹锛岀‘淇?key 浠?'new' 寮€濮?
     showModal.value = false;
 
-    // 等待 DOM 更新完成
+    // 绛夊緟 DOM 鏇存柊瀹屾垚
     await nextTick();
 
-    // 然后设置所有值（此时模态框已隐藏，不会触发重新挂载）
+    // 鐒跺悗璁剧疆鎵€鏈夊€硷紙姝ゆ椂妯℃€佹宸查殣钘忥紝涓嶄細瑙﹀彂閲嶆柊鎸傝浇锛?
     editingTodoId.value = id;
     newTodoContent.value = todo.content;
     newTodoRepeatMode.value = todo.repeatMode as RepeatMode;
@@ -304,11 +326,23 @@ const openEditModal = async (id: string) => {
       newTodoSpecificDates.value = [];
     }
 
+    if (isSubtodo && todo.cycleStartDate) {
+      newSubtodoCycleEnabled.value = true;
+      newSubtodoCycleStartDate.value = todo.cycleStartDate;
+      newSubtodoCycleActiveDays.value = todo.cycleActiveDays || 7;
+      newSubtodoCycleIntervalWeeks.value = todo.cycleIntervalWeeks || 4;
+    } else {
+      resetSubtodoCycleForm();
+    }
+
     // Load subtodos if editing a parent todo
     if (!isSubtodo && todo.subtodos && todo.subtodos.length > 0) {
       modalSubtodos.value = todo.subtodos.map(st => ({
         id: st.id,
-        content: st.content
+        content: st.content,
+        cycleStartDate: st.cycleStartDate,
+        cycleActiveDays: st.cycleActiveDays,
+        cycleIntervalWeeks: st.cycleIntervalWeeks,
       }));
       console.log('=== [EDIT] Loaded subtodos:', modalSubtodos.value.length);
     } else {
@@ -316,10 +350,10 @@ const openEditModal = async (id: string) => {
       console.log('=== [EDIT] No existing subtodos');
     }
 
-    // 再次等待 DOM 更新
+    // 鍐嶆绛夊緟 DOM 鏇存柊
     await nextTick();
 
-    // 最后显示模态框（此时 key 和值都已正确设置）
+    // 鏈€鍚庢樉绀烘ā鎬佹锛堟鏃?key 鍜屽€奸兘宸叉纭缃級
     showModal.value = true;
 
     console.log('=== [EDIT] Modal should now be visible, addingSubtodoForParentId=', addingSubtodoForParentId.value);
@@ -334,6 +368,7 @@ const closeAddModal = () => {
   editingTodoId.value = null;
   addingSubtodoForParentId.value = null;
   editingSubtodo.value = false;
+  resetSubtodoCycleForm();
   modalSubtodos.value = [];
   newSubtodoContent.value = '';
 };
@@ -376,6 +411,7 @@ const openAddSubtodoModal = (parentId: string) => {
   newTodoContent.value = '';
   newTodoRepeatMode.value = 'none';
   newTodoWeekdays.value = [];
+  resetSubtodoCycleForm();
   showModal.value = true;
 };
 
@@ -481,35 +517,6 @@ const handleMoveDown = async (id: string) => {
   }
 };
 
-// Handle complete early - show confirmation first
-const handleCompleteEarly = (id: string) => {
-  const todo = findTodoInTree(todos.value, id);
-  if (todo) {
-    completeEarlyId.value = id;
-    completeEarlyContent.value = todo.content;
-    showCompleteEarlyConfirm.value = true;
-  }
-};
-
-// Close complete early confirmation
-const closeCompleteEarlyConfirm = () => {
-  showCompleteEarlyConfirm.value = false;
-  completeEarlyId.value = null;
-  completeEarlyContent.value = '';
-};
-
-// Confirm complete early
-const confirmCompleteEarly = async () => {
-  if (completeEarlyId.value) {
-    try {
-      await completeEarly(completeEarlyId.value);
-      closeCompleteEarlyConfirm();
-    } catch (e) {
-      console.error('Failed to complete early:', e);
-    }
-  }
-};
-
 // Scroll to top function
 const scrollToTop = () => {
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -546,6 +553,10 @@ const buildTodoTreeFromFlat = (flatTodos: TodoItemType[]): TodoItemType[] => {
 // Submit new todo or edit
 const submitAddTodo = async () => {
   if (!newTodoContent.value.trim()) return;
+  if ((editingSubtodo.value || addingSubtodoForParentId.value) && newSubtodoCycleEnabled.value && !newSubtodoCycleStartDate.value) {
+    alert('请先选择首轮启用日期');
+    return;
+  }
 
   try {
     // Format weekdays as comma-separated string
@@ -557,6 +568,7 @@ const submitAddTodo = async () => {
     const specificDatesStr = newTodoRepeatMode.value === 'specific_dates' && newTodoSpecificDates.value.length > 0
       ? newTodoSpecificDates.value.sort().join(',')
       : undefined;
+    const subtodoCyclePayload = getSubtodoCyclePayload();
 
     console.log("=== [SUBMIT] Starting submission, modalSubtodos.length =", modalSubtodos.value.length);
     console.log("=== [SUBMIT] newSubtodoContent =", newSubtodoContent.value.trim());
@@ -572,6 +584,9 @@ const submitAddTodo = async () => {
         repeatMode: newTodoRepeatMode.value,
         weekdays: weekdaysStr,
         specificDates: specificDatesStr,
+        cycleStartDate: editingSubtodo.value ? subtodoCyclePayload.cycleStartDate : null,
+        cycleActiveDays: editingSubtodo.value ? subtodoCyclePayload.cycleActiveDays : null,
+        cycleIntervalWeeks: editingSubtodo.value ? subtodoCyclePayload.cycleIntervalWeeks : null,
       });
 
       // If editing a parent todo, handle subtodos
@@ -604,6 +619,9 @@ const submitAddTodo = async () => {
               repeatMode: 'none',
               weekdays: null,
               parentId: editingTodoId.value,
+              cycleStartDate: subtodo.cycleStartDate || null,
+              cycleActiveDays: subtodo.cycleActiveDays || null,
+              cycleIntervalWeeks: subtodo.cycleIntervalWeeks || null,
             });
           }
         }
@@ -616,13 +634,20 @@ const submitAddTodo = async () => {
       todos.value = buildTodoTreeFromFlat(flatTodos);
     } else if (addingSubtodoForParentId.value) {
       // Adding a subtodo to existing parent
-      await handleAdd(
-        newTodoContent.value.trim(),
-        'none',
-        undefined,  // weekdays
-        undefined,  // specificDates
-        addingSubtodoForParentId.value  // parentId
-      );
+      await invoke('add_todo', {
+        content: newTodoContent.value.trim(),
+        repeatMode: 'none',
+        weekdays: null,
+        specificDates: null,
+        parentId: addingSubtodoForParentId.value,
+        cycleStartDate: subtodoCyclePayload.cycleStartDate,
+        cycleActiveDays: subtodoCyclePayload.cycleActiveDays,
+        cycleIntervalWeeks: subtodoCyclePayload.cycleIntervalWeeks,
+      });
+      const flatTodos = await invoke<TodoItemType[]>('get_todos', {
+        targetDate: viewDate.value || null
+      });
+      todos.value = buildTodoTreeFromFlat(flatTodos);
       // Close modal after adding subtodo
       closeAddModal();
     } else {
@@ -654,7 +679,7 @@ const submitAddTodo = async () => {
           console.log("=== [ADD] Found content in input box, auto-adding:", newSubtodoContent.value.trim());
           modalSubtodos.value.push({
             id: Date.now().toString(),
-            content: newSubtodoContent.value.trim()
+            content: newSubtodoContent.value.trim(),
           });
           console.log("=== [ADD] Auto-added input content to modalSubtodos:", newSubtodoContent.value.trim());
           newSubtodoContent.value = '';
@@ -676,6 +701,9 @@ const submitAddTodo = async () => {
               repeatMode: 'none',
               weekdays: null,
               parentId: parentId,
+              cycleStartDate: subtodo.cycleStartDate || null,
+              cycleActiveDays: subtodo.cycleActiveDays || null,
+              cycleIntervalWeeks: subtodo.cycleIntervalWeeks || null,
             });
             console.log("=== [ADD] Subtodo saved successfully");
           } else {
@@ -769,19 +797,19 @@ const goToToday = async () => {
               <span class="lunar-zodiac">{{ viewDateDisplay.lunarZodiac }}</span>
               <span class="lunar-date">{{ viewDateDisplay.lunarMonthText }}</span>
             </div>
-            <button v-if="viewDate" @click="goToToday" class="back-today-btn" title="回到今天">
-              回到今天
+            <button v-if="viewDate" @click="goToToday" class="back-today-btn" title="鍥炲埌浠婂ぉ">
+              鍥炲埌浠婂ぉ
             </button>
           </div>
         </div>
         <div class="header-actions">
-          <button @click="openAddModal" class="add-todo-btn" title="新增待办">
+          <button @click="openAddModal" class="add-todo-btn" title="鏂板寰呭姙">
             <span class="add-icon">+</span>
-            <span class="add-text">新增待办</span>
+            <span class="add-text">鏂板寰呭姙</span>
           </button>
           <div class="date-picker-wrapper">
-            <button @click="showDatePicker = !showDatePicker" class="date-picker-btn" title="查看其他日期">
-              📅
+            <button @click="showDatePicker = !showDatePicker" class="date-picker-btn" title="鏌ョ湅鍏朵粬鏃ユ湡">
+              馃搮
             </button>
             <div v-if="showDatePicker" class="date-picker-dropdown">
               <div class="week-dates">
@@ -800,15 +828,15 @@ const goToToday = async () => {
               </div>
             </div>
           </div>
-          <button @click="showSettings = true" class="settings-btn" title="设置">
-            <span class="settings-icon">⚙️</span>
+          <button @click="showSettings = true" class="settings-btn" title="璁剧疆">
+            <span class="settings-icon">鈿欙笍</span>
           </button>
         </div>
       </header>
 
       <div class="app-content">
         <div v-if="error" class="error-message">
-          <span class="error-icon">⚠️</span>
+          <span class="error-icon">鈿狅笍</span>
           <span>{{ error }}</span>
         </div>
 
@@ -822,7 +850,7 @@ const goToToday = async () => {
             placeholder="在这里记录你的备忘...（支持多行，自动保存）"
             :style="{ height: memoHeight + 'px' }"
           ></textarea>
-          <div v-if="isSavingMemo" class="memo-saving">保存中...</div>
+          <div v-if="isSavingMemo" class="memo-saving">淇濆瓨涓?..</div>
         </div>
 
         <TodoList
@@ -837,7 +865,6 @@ const goToToday = async () => {
           @toggle-parent="handleToggleParent"
           @move-up="handleMoveUp"
           @move-down="handleMoveDown"
-          @complete-early="handleCompleteEarly"
           @toggle-disable="toggleDisable"
         />
       </div>
@@ -855,8 +882,8 @@ const goToToday = async () => {
     </div>
 
     <!-- Scroll to Top Button -->
-    <button @click="scrollToTop" class="scroll-to-top-btn" title="回到顶部">
-      ↑
+    <button @click="scrollToTop" class="scroll-to-top-btn" title="鍥炲埌椤堕儴">
+      鈫?
     </button>
 
     <!-- Add Todo Modal -->
@@ -866,7 +893,7 @@ const goToToday = async () => {
           <h2 class="modal-title">
             {{ addingSubtodoForParentId ? '添加子待办' : (editingTodoId ? (editingSubtodo ? '编辑子待办' : '编辑父待办') : '新增待办') }}
           </h2>
-          <button @click="closeAddModal" class="modal-close">✕</button>
+          <button @click="closeAddModal" class="modal-close">×</button>
         </div>
         <div class="modal-body">
           <div class="form-group">
@@ -886,7 +913,7 @@ const goToToday = async () => {
               <label class="form-label">子待办</label>
               <!-- Show "add subtodo" button -->
               <button @click="addModalSubtodo" class="btn-add-subtodo-small">
-                <span>➕ 添加子待办</span>
+                <span>添加子待办</span>
               </button>
             </div>
 
@@ -904,7 +931,7 @@ const goToToday = async () => {
                   class="subtodo-input"
                   placeholder="子待办内容..."
                 />
-                <button @click="removeModalSubtodo(subtodo.id)" class="subtodo-remove">✕</button>
+                <button @click="removeModalSubtodo(subtodo.id)" class="subtodo-remove">×</button>
               </div>
             </div>
 
@@ -930,15 +957,15 @@ const goToToday = async () => {
               </label>
               <label class="repeat-option">
                 <input type="radio" v-model="newTodoRepeatMode" value="daily" />
-                <span>每日</span>
+                <span>姣忔棩</span>
               </label>
               <label class="repeat-option">
                 <input type="radio" v-model="newTodoRepeatMode" value="weekly" />
-                <span>每周</span>
+                <span>姣忓懆</span>
               </label>
               <label class="repeat-option">
                 <input type="radio" v-model="newTodoRepeatMode" value="specific_dates" />
-                <span>指定日期</span>
+                <span>鎸囧畾鏃ユ湡</span>
               </label>
             </div>
 
@@ -963,6 +990,42 @@ const goToToday = async () => {
               <span v-if="newTodoWeekdays.length === 0" class="form-hint warning">请至少选择一天</span>
             </div>
           </div>
+
+          <div v-if="addingSubtodoForParentId || editingSubtodo" class="form-group">
+            <label class="form-label">周期启用</label>
+            <label class="cycle-toggle-row">
+              <input type="checkbox" v-model="newSubtodoCycleEnabled" />
+              <span>按固定周期间隔自动启用/禁用</span>
+            </label>
+            <div v-if="newSubtodoCycleEnabled" class="cycle-config-panel">
+              <label class="cycle-config-field">
+                <span>首轮启用日期</span>
+                <input type="date" v-model="newSubtodoCycleStartDate" class="form-input" />
+              </label>
+              <label class="cycle-config-field">
+                <span>启用天数</span>
+                <input
+                  type="number"
+                  v-model.number="newSubtodoCycleActiveDays"
+                  class="form-input"
+                  min="1"
+                  :max="newSubtodoCycleIntervalWeeks * 7"
+                />
+              </label>
+              <label class="cycle-config-field">
+                <span>间隔周数</span>
+                <input
+                  type="number"
+                  v-model.number="newSubtodoCycleIntervalWeeks"
+                  class="form-input"
+                  min="1"
+                  max="52"
+                />
+              </label>
+              <span class="form-hint">启用期包含开始日；例如 2026-07-14 启用 7 天，就是启用到 2026-07-20，每 4 周再次启用。</span>
+              <span v-if="!newSubtodoCycleStartDate" class="form-hint warning">开启周期启用后，请选择首轮启用日期</span>
+            </div>
+          </div>
         </div>
         <div class="modal-footer">
           <button @click="closeAddModal" class="btn-cancel">取消</button>
@@ -975,8 +1038,8 @@ const goToToday = async () => {
     <div v-if="showDeleteConfirm" class="modal-overlay" @click.self="closeDeleteConfirm">
       <div class="modal-content modal-small">
         <div class="modal-header">
-          <h2 class="modal-title">确认删除</h2>
-          <button @click="closeDeleteConfirm" class="modal-close">✕</button>
+          <h2 class="modal-title">纭鍒犻櫎</h2>
+          <button @click="closeDeleteConfirm" class="modal-close">×</button>
         </div>
         <div class="modal-body">
           <p class="delete-message">
@@ -984,15 +1047,15 @@ const goToToday = async () => {
           </p>
           <p class="delete-todo-content">{{ deletingTodoContent }}</p>
           <p v-if="deletingTodoRepeatMode === 'daily'" class="delete-warning">
-            ⚠️ 这是一个每天重复的待办，删除后将永久消失，第二天不会再出现。
+            这是一个每天重复的待办，删除后将永久消失，第二天不会再出现。
           </p>
           <p v-if="deletingTodoRepeatMode === 'weekly'" class="delete-warning">
-            ⚠️ 这是一个每周重复的待办，删除后将永久消失，下周不会再出现。
+            这是一个每周重复的待办，删除后将永久消失，下周不会再出现。
           </p>
         </div>
         <div class="modal-footer">
-          <button @click="closeDeleteConfirm" class="btn-cancel">取消</button>
-          <button @click="confirmDelete" class="btn-confirm btn-danger">确认删除</button>
+          <button @click="closeDeleteConfirm" class="btn-cancel">鍙栨秷</button>
+          <button @click="confirmDelete" class="btn-confirm btn-danger">纭鍒犻櫎</button>
         </div>
       </div>
     </div>
@@ -1002,7 +1065,7 @@ const goToToday = async () => {
       <div class="modal-content modal-small">
         <div class="modal-header">
           <h2 class="modal-title">完成父待办</h2>
-          <button @click="closeParentCompleteConfirm" class="modal-close">✕</button>
+          <button @click="closeParentCompleteConfirm" class="modal-close">×</button>
         </div>
         <div class="modal-body">
           <p class="delete-message">
@@ -1010,35 +1073,12 @@ const goToToday = async () => {
           </p>
           <p class="delete-todo-content">"{{ parentCompleteContent }}"</p>
           <p class="delete-warning">
-            ⚠️ 确认后，所有子待办都会被标记为完成。
+            确认后，所有子待办都会被标记为完成。
           </p>
         </div>
         <div class="modal-footer">
-          <button @click="closeParentCompleteConfirm" class="btn-cancel">取消</button>
-          <button @click="confirmParentComplete" class="btn-confirm">确认完成</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Complete Early Confirmation Modal -->
-    <div v-if="showCompleteEarlyConfirm" class="modal-overlay" @click.self="closeCompleteEarlyConfirm">
-      <div class="modal-content modal-small">
-        <div class="modal-header">
-          <h2 class="modal-title">提前完成</h2>
-          <button @click="closeCompleteEarlyConfirm" class="modal-close">✕</button>
-        </div>
-        <div class="modal-body">
-          <p class="delete-message">
-            确定要提前完成这个待办吗？
-          </p>
-          <p class="delete-todo-content">"{{ completeEarlyContent }}"</p>
-          <p class="delete-warning">
-            ⚠️ 提前完成后，待办将在下一个周期重置。此操作不可撤销。
-          </p>
-        </div>
-        <div class="modal-footer">
-          <button @click="closeCompleteEarlyConfirm" class="btn-cancel">取消</button>
-          <button @click="confirmCompleteEarly" class="btn-confirm">确认完成</button>
+          <button @click="closeParentCompleteConfirm" class="btn-cancel">鍙栨秷</button>
+          <button @click="confirmParentComplete" class="btn-confirm">纭瀹屾垚</button>
         </div>
       </div>
     </div>
@@ -1047,8 +1087,8 @@ const goToToday = async () => {
     <div v-if="showSettings" class="modal-overlay" @click.self="showSettings = false">
       <div class="modal-content modal-large">
         <div class="modal-header">
-          <h2 class="modal-title">设置</h2>
-          <button @click="showSettings = false" class="modal-close">✕</button>
+          <h2 class="modal-title">璁剧疆</h2>
+          <button @click="showSettings = false" class="modal-close">×</button>
         </div>
         <div class="modal-body modal-body-scroll">
           <Settings @shortcuts-changed="handleShortcutsChanged" />
@@ -1716,6 +1756,48 @@ body {
   padding: 12px;
   background: var(--bg-secondary);
   border-radius: 8px;
+}
+
+.cycle-toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.cycle-toggle-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary-color);
+}
+
+.cycle-config-panel {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.4fr) minmax(92px, 0.8fr) minmax(92px, 0.8fr);
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid rgba(79, 70, 229, 0.16);
+  border-radius: 8px;
+}
+
+.cycle-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.cycle-config-panel .form-hint {
+  grid-column: 1 / -1;
+  margin-top: 0;
 }
 
 /* Subtodos in Modal Styles */

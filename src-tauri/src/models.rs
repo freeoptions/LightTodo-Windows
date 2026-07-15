@@ -1,25 +1,93 @@
-use chrono::Local;
-use chrono::Datelike;
+﻿use chrono::Local;
+use chrono::{Datelike, Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+fn is_effectively_done_for_date(todo: &TodoItem, date_to_check: &str) -> bool {
+    if todo.completed || todo.disabled {
+        return true;
+    }
+
+    if todo.parent_id.is_some() {
+        if let Some(cycle) = TodoStore::cycle_window_for_date(todo, date_to_check) {
+            if !cycle.active {
+                return true;
+            }
+        }
+
+        if let Some(expiry) = &todo.expiry_date {
+            return date_to_check > expiry.as_str();
+        }
+    }
+
+    false
+}
+
+#[derive(Debug, Clone)]
+struct CycleWindowState {
+    active: bool,
+    window_start: NaiveDate,
+    window_end: NaiveDate,
+}
+
+fn write_json_atomically(file_path: &PathBuf, json: &str) -> Result<(), String> {
+    let parent = file_path
+        .parent()
+        .ok_or_else(|| format!("Invalid file path: {:?}", file_path))?;
+    fs::create_dir_all(parent)
+        .map_err(|e| format!("Failed to create data directory: {}", e))?;
+
+    let file_name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Invalid file name: {:?}", file_path))?;
+    let temp_path = parent.join(format!("{}.tmp", file_name));
+    let backup_path = parent.join(format!("{}.bak", file_name));
+
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temp_path)
+            .map_err(|e| format!("Failed to create temp file: {}", e))?;
+        file.write_all(json.as_bytes())
+            .map_err(|e| format!("Failed to write temp file: {}", e))?;
+        file.sync_all()
+            .map_err(|e| format!("Failed to flush temp file: {}", e))?;
+    }
+
+    if file_path.exists() {
+        let _ = fs::remove_file(&backup_path);
+        fs::rename(file_path, &backup_path)
+            .map_err(|e| format!("Failed to move existing data file to backup: {}", e))?;
+    }
+
+    if let Err(rename_err) = fs::rename(&temp_path, file_path) {
+        if backup_path.exists() && !file_path.exists() {
+            let _ = fs::rename(&backup_path, file_path);
+        }
+        return Err(format!("Failed to replace data file atomically: {}", rename_err));
+    }
+
+    Ok(())
+}
 
 /// Global shortcut configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShortcutConfig {
     #[serde(rename = "showHideWindow", alias = "show_hide_window")]
     pub show_hide_window: String,
-    #[serde(rename = "toggleFloating", alias = "toggle_floating")]
-    pub toggle_floating: String,
 }
 
 impl Default for ShortcutConfig {
     fn default() -> Self {
         Self {
             show_hide_window: "CommandOrControl+Shift+Alt+digit0".to_string(),
-            toggle_floating: "CommandOrControl+Shift+F".to_string(),
         }
     }
 }
@@ -52,12 +120,20 @@ pub struct Settings {
     pub window: WindowState,
     #[serde(default)]
     pub memo: String,
-    #[serde(default = "default_memo_height")]
+    #[serde(rename = "memoHeight", alias = "memo_height", default = "default_memo_height")]
     pub memo_height: u32,
+    #[serde(rename = "autoLaunch", alias = "auto_launch", default = "default_auto_launch")]
+    pub auto_launch: bool,
+    #[serde(rename = "priorityColors", alias = "priority_colors", default)]
+    pub priority_colors: Option<HashMap<u8, String>>,
 }
 
 fn default_memo_height() -> u32 {
-    80
+    200
+}
+
+fn default_auto_launch() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -66,7 +142,9 @@ impl Default for Settings {
             shortcuts: ShortcutConfig::default(),
             window: WindowState::default(),
             memo: String::new(),
-            memo_height: 80,
+            memo_height: 200,
+            auto_launch: true,
+            priority_colors: None,
         }
     }
 }
@@ -107,7 +185,12 @@ impl SettingsStore {
 
         // Try to parse, if fails, backup old file and use defaults
         match serde_json::from_str::<Settings>(&content) {
-            Ok(settings) => Ok(settings),
+            Ok(settings) => {
+                if content.contains("\"toggleFloating\"") || content.contains("\"toggle_floating\"") {
+                    let _ = self.save(&settings);
+                }
+                Ok(settings)
+            }
             Err(e) => {
                 eprintln!("Failed to parse settings: {}, using defaults", e);
                 // Backup old settings file
@@ -127,13 +210,7 @@ impl SettingsStore {
         let json = serde_json::to_string_pretty(settings)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
-        let mut file = File::create(&self.file_path)
-            .map_err(|e| format!("Failed to create settings file: {}", e))?;
-
-        file.write_all(json.as_bytes())
-            .map_err(|e| format!("Failed to write settings: {}", e))?;
-
-        Ok(())
+        write_json_atomically(&self.file_path, &json)
     }
 }
 
@@ -145,23 +222,44 @@ pub struct TodoItem {
     #[serde(rename = "repeatMode", alias = "repeat_mode")]
     pub repeat_mode: String, // "daily", "weekly", "none", "specific_dates"
     #[serde(rename = "weekdays", alias = "week_days")]
-    pub weekdays: Option<String>, // For weekly mode: "1,3,5" (周一=1, 周日=7)
+    pub weekdays: Option<String>, // For weekly mode: "1,3,5" (鍛ㄤ竴=1, 鍛ㄦ棩=7)
+    #[serde(rename = "activeWeekdays", alias = "active_weekdays", default)]
+    pub active_weekdays: Option<String>,
     #[serde(rename = "specificDates", alias = "specific_dates")]
     #[serde(default)]
     pub specific_dates: Option<String>, // For specific_dates mode: "2025-03-10,2025-03-11"
     #[serde(rename = "parentId", alias = "parent_id")]
-    pub parent_id: Option<String>, // 父待办ID，None表示是顶级待办
+    pub parent_id: Option<String>, // 鐖跺緟鍔濱D锛孨one琛ㄧず鏄《绾у緟鍔?
     #[serde(rename = "expanded", default = "serde_aux::default_true")]
-    pub expanded: bool, // 是否展开子待办
+    pub expanded: bool, // 鏄惁灞曞紑瀛愬緟鍔?
     pub completed: bool,
     #[serde(default)]
-    pub disabled: bool, // 是否禁用，禁用后任务会变成完成状态且无法操作
+    pub disabled: bool, // 鏄惁绂佺敤锛岀鐢ㄥ悗浠诲姟浼氬彉鎴愬畬鎴愮姸鎬佷笖鏃犳硶鎿嶄綔
+    #[serde(rename = "inactiveByWeekday", alias = "inactive_by_weekday", default)]
+    pub inactive_by_weekday: bool,
     #[serde(rename = "createdAt", alias = "created_at")]
     pub created_at: i64,
     #[serde(rename = "completedAt", alias = "completed_at")]
     pub completed_at: Option<i64>,
     #[serde(rename = "lastResetDate", alias = "last_reset_date")]
     pub last_reset_date: Option<String>, // YYYY-MM-DD for daily/weekly items
+    #[serde(rename = "expiryDate", alias = "expiry_date")]
+    #[serde(default)]
+    pub expiry_date: Option<String>, // YYYY-MM-DD 鏍煎紡锛屼粎鐢ㄤ簬瀛愬緟鍔?
+    #[serde(rename = "cycleStartDate", alias = "cycle_start_date", default)]
+    pub cycle_start_date: Option<String>,
+    #[serde(rename = "cycleActiveDays", alias = "cycle_active_days", default)]
+    pub cycle_active_days: Option<u32>,
+    #[serde(rename = "cycleIntervalWeeks", alias = "cycle_interval_weeks", default)]
+    pub cycle_interval_weeks: Option<u32>,
+    #[serde(rename = "priority", default)]
+    pub priority: Option<u8>, // 1, 2, 3 鎴?None锛屽彧瀵圭埗寰呭姙鏈夋晥
+    #[serde(rename = "order", default)]
+    pub order: Option<i32>, // 鎺掑簭瀛楁锛岀敤浜庢墜鍔ㄨ皟鏁村緟鍔為『搴?
+    #[serde(rename = "weekStart", alias = "week_start", default)]
+    pub week_start: Option<String>, // YYYY-MM-DD 鏍煎紡锛岃褰曞懆寰呭姙鎵€灞炲懆鐨勫懆涓€锛屼粎鐢ㄤ簬 weekly_this_week 妯″紡
+    #[serde(rename = "monthStart", alias = "month_start", default)]
+    pub month_start: Option<String>, // YYYY-MM-DD 鏍煎紡锛岃褰曟湀寰呭姙鎵€灞炴湀鐨勭涓€澶╋紝浠呯敤浜?monthly_this_month 妯″紡
 }
 
 // Helper module for serde default value
@@ -176,14 +274,24 @@ impl TodoItem {
             content,
             repeat_mode,
             weekdays,
+            active_weekdays: None,
             specific_dates: None,
             parent_id,
-            expanded: true, // 默认展开
+            expanded: true, // 榛樿灞曞紑
             completed: false,
-            disabled: false, // 默认不禁用
+            disabled: false, // 榛樿涓嶇鐢?
+            inactive_by_weekday: false,
             created_at: Local::now().timestamp(),
             completed_at: None,
             last_reset_date: None,
+            expiry_date: None,
+            cycle_start_date: None,
+            cycle_active_days: None,
+            cycle_interval_weeks: None,
+            priority: None,
+            order: None,
+            week_start: None,
+            month_start: None,
         }
     }
 }
@@ -226,13 +334,7 @@ impl TodoStore {
         let json = serde_json::to_string_pretty(todos)
             .map_err(|e| format!("Failed to serialize todos: {}", e))?;
 
-        let mut file = File::create(&self.file_path)
-            .map_err(|e| format!("Failed to create todos file: {}", e))?;
-
-        file.write_all(json.as_bytes())
-            .map_err(|e| format!("Failed to write todos: {}", e))?;
-
-        Ok(())
+        write_json_atomically(&self.file_path, &json)
     }
 
     /// Get current date as YYYY-MM-DD string
@@ -274,6 +376,114 @@ impl TodoStore {
         monday.format("%Y-%m-%d").to_string()
     }
 
+    /// Get the first day of the current month as YYYY-MM-DD string
+    pub fn current_month_first() -> String {
+        let now = Local::now();
+        let first_day = now.with_day(1).unwrap_or(now);
+        first_day.format("%Y-%m-%d").to_string()
+    }
+
+    fn parse_weekday_list(raw: Option<&String>) -> Vec<u32> {
+        raw.map(|value| {
+            value
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u32>().ok())
+                .filter(|d| (1..=7).contains(d))
+                .collect()
+        }).unwrap_or_default()
+    }
+
+    fn is_subtodo_active_on_weekday(todo: &TodoItem, weekday: u32) -> bool {
+        let selected_weekdays = Self::parse_weekday_list(todo.active_weekdays.as_ref());
+        if selected_weekdays.is_empty() {
+            return true;
+        }
+        selected_weekdays.contains(&weekday)
+    }
+
+    fn is_subtodo_active_on_date(todo: &TodoItem, date_str: &str) -> bool {
+        let target_date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => return true,
+        };
+        Self::is_subtodo_active_on_weekday(todo, target_date.weekday().number_from_monday())
+    }
+
+    fn cycle_window_for_date(todo: &TodoItem, date_str: &str) -> Option<CycleWindowState> {
+        if todo.parent_id.is_none() {
+            return None;
+        }
+
+        let start_date = NaiveDate::parse_from_str(todo.cycle_start_date.as_ref()?, "%Y-%m-%d").ok()?;
+        let target_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()?;
+        let interval_weeks = todo.cycle_interval_weeks.unwrap_or(4).clamp(1, 52);
+        let interval_days = i64::from(interval_weeks) * 7;
+        let active_days = i64::from(todo.cycle_active_days.unwrap_or(7).clamp(1, interval_days as u32));
+
+        if target_date < start_date {
+            return Some(CycleWindowState {
+                active: false,
+                window_start: start_date,
+                window_end: start_date + Duration::days(active_days - 1),
+            });
+        }
+
+        let days_since_start = (target_date - start_date).num_days();
+        let cycle_index = days_since_start / interval_days;
+        let window_start = start_date + Duration::days(cycle_index * interval_days);
+        let window_end = window_start + Duration::days(active_days - 1);
+
+        Some(CycleWindowState {
+            active: target_date >= window_start && target_date <= window_end,
+            window_start,
+            window_end,
+        })
+    }
+
+    pub fn apply_cycle_activation_for_date(todos: &mut Vec<TodoItem>, date_str: &str) -> bool {
+        let mut changed = false;
+        let mut parent_ids_to_uncomplete: HashSet<String> = HashSet::new();
+
+        for todo in todos.iter_mut() {
+            if todo.parent_id.is_none() || todo.disabled {
+                continue;
+            }
+
+            let Some(cycle) = Self::cycle_window_for_date(todo, date_str) else {
+                continue;
+            };
+
+            if !cycle.active {
+                continue;
+            }
+
+            let window_start = cycle.window_start.format("%Y-%m-%d").to_string();
+            if todo.last_reset_date.as_deref() == Some(window_start.as_str()) {
+                continue;
+            }
+
+            todo.completed = false;
+            todo.completed_at = None;
+            todo.last_reset_date = Some(window_start);
+            if let Some(parent_id) = &todo.parent_id {
+                parent_ids_to_uncomplete.insert(parent_id.clone());
+            }
+            changed = true;
+        }
+
+        if !parent_ids_to_uncomplete.is_empty() {
+            for todo in todos.iter_mut().filter(|todo| parent_ids_to_uncomplete.contains(&todo.id)) {
+                if todo.completed || todo.completed_at.is_some() {
+                    todo.completed = false;
+                    todo.completed_at = None;
+                    changed = true;
+                }
+            }
+        }
+
+        changed
+    }
+
     /// Check if a weekly todo needs to be reset
     pub fn should_reset_weekly(todo: &TodoItem) -> bool {
         if todo.repeat_mode != "weekly" {
@@ -300,7 +510,11 @@ impl TodoStore {
         let today = Self::current_weekday();
         let is_today_selected = selected_weekdays.contains(&today);
 
+        eprintln!("=== [SHOULD_RESET_WEEKLY] todo='{}', today={}, selected_weekdays={}, is_today_selected={}",
+            todo.content, today, weekdays_str, is_today_selected);
+
         if !is_today_selected {
+            eprintln!("=== [SHOULD_RESET_WEEKLY] Today not selected, returning false");
             return false;
         }
 
@@ -315,21 +529,40 @@ impl TodoStore {
                 let last_reset_date = chrono::NaiveDate::parse_from_str(last_date, "%Y-%m-%d").ok();
                 let week_monday = chrono::NaiveDate::parse_from_str(&current_week_monday, "%Y-%m-%d").ok();
 
-                if let (Some(last_reset), Some(week_monday)) = (last_reset_date, week_monday) {
-                    // Only reset if the last reset was before this week's Monday
-                    // This means if someone completed early this week, it won't reset again
-                    last_reset < week_monday
+                if let (Some(_last_reset), Some(_week_monday)) = (last_reset_date, week_monday) {
+                    // BUG FIX: For weekly todos with multiple weekdays (e.g., 5,6,7),
+                    // we need to reset EACH day that is selected, not just once per week.
+                    // The original logic only allowed reset if last_reset was BEFORE week_monday,
+                    // but this prevents resetting on Saturday after completing on Friday.
+                    //
+                    // NEW LOGIC: Reset if:
+                    // 1. last_reset is from a previous week (last_reset < week_monday) - classic weekly reset
+                    // 2. OR last_reset is from today but a DIFFERENT selected weekday in the same week
+                    //    (e.g., completed Friday, now it's Saturday, both are selected)
+                    //
+                    // Actually simpler: Just check if last_reset is NOT today
+                    // If the todo was reset/completed on a different day, reset again
+                    let not_reset_today = last_date != &today_str;
+                    eprintln!("=== [SHOULD_RESET_WEEKLY] last_reset={}, week_monday={}, today={}, not_reset_today={}",
+                        last_date, current_week_monday, today_str, not_reset_today);
+                    not_reset_today
                 } else {
                     // If parsing failed, use the simple check (already reset today?)
-                    last_date != &today_str
+                    let not_reset_today = last_date != &today_str;
+                    eprintln!("=== [SHOULD_RESET_WEEKLY] Parsing failed, using simple check: not_reset_today={}", not_reset_today);
+                    not_reset_today
                 }
             }
-            None => true,
+            None => {
+                eprintln!("=== [SHOULD_RESET_WEEKLY] No last_reset_date, returning true");
+                true
+            }
         };
 
         if should_reset {
-            eprintln!("Weekly todo needs reset: '{}', last_reset={:?}, today={}, selected_weekdays={}",
-                todo.content, todo.last_reset_date, today, weekdays_str);
+            eprintln!("=== [SHOULD_RESET_WEEKLY] todo '{}' NEEDS reset", todo.content);
+        } else {
+            eprintln!("=== [SHOULD_RESET_WEEKLY] todo '{}' does NOT need reset (completed today)", todo.content);
         }
 
         should_reset
@@ -347,15 +580,25 @@ impl TodoStore {
                 eprintln!("Subtodo '{}' hidden because parent is not visible", todo.content);
                 return false;
             }
+            if !Self::is_subtodo_active_on_date(todo, date_str) {
+                eprintln!("Subtodo '{}' hidden because weekday is inactive for {}", todo.content, date_str);
+                return true;
+            }
             eprintln!("Subtodo '{}' visible because parent is visible", todo.content);
-            return true; // Subtodo always shows if parent shows
+            return true;
+        }
+
+        // For "long_term" mode, always show (persistent todos without time limit)
+        if todo.repeat_mode == "long_term" {
+            eprintln!("Long term todo '{}': always showing", todo.content);
+            return true;
         }
 
         // For "none" repeat mode todos, only show on the creation date
         if todo.repeat_mode == "none" {
             // Parse creation date
-            let created_date = chrono::NaiveDateTime::from_timestamp_opt(todo.created_at, 0)
-                .map(|dt| dt.format("%Y-%m-%d").to_string());
+            let created_date = chrono::DateTime::from_timestamp(todo.created_at, 0)
+                .map(|dt| dt.date_naive().format("%Y-%m-%d").to_string());
             let created_date_str = created_date.as_deref();
             // Only show if target date matches creation date
             let is_creation_date = created_date_str.map_or(false, |d| d == date_str);
@@ -379,6 +622,52 @@ impl TodoStore {
             return false;
         }
 
+        // For "weekly_this_week" mode (鍛ㄥ緟鍔?, show if target date is in the same week as the todo
+        if todo.repeat_mode == "weekly_this_week" {
+            if let Some(week_start_str) = &todo.week_start {
+                // Parse the week_start (Monday of the week)
+                let week_start = match chrono::NaiveDate::parse_from_str(week_start_str, "%Y-%m-%d") {
+                    Ok(d) => d,
+                    Err(_) => return true, // Invalid date, always show
+                };
+                // Parse the target date
+                let target_date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    Ok(d) => d,
+                    Err(_) => return true, // Invalid date, always show
+                };
+                // Calculate the difference in days
+                let days_diff = (target_date - week_start).num_days();
+                // Show if target date is within 0-6 days of the week_start (Monday to Sunday)
+                let in_same_week = days_diff >= 0 && days_diff <= 6;
+                eprintln!("Weekly_this_week todo '{}': week_start={}, target_date={}, days_diff={}, in_same_week={}",
+                    todo.content, week_start_str, date_str, days_diff, in_same_week);
+                return in_same_week;
+            }
+            return true; // No week_start, always show
+        }
+
+        // For "monthly_this_month" mode (鏈湀寰呭姙), show if target date is in the same month as the todo
+        if todo.repeat_mode == "monthly_this_month" {
+            if let Some(month_start_str) = &todo.month_start {
+                // Parse the month_start (first day of the month)
+                let month_start = match chrono::NaiveDate::parse_from_str(month_start_str, "%Y-%m-%d") {
+                    Ok(d) => d,
+                    Err(_) => return true, // Invalid date, always show
+                };
+                // Parse the target date
+                let target_date = match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    Ok(d) => d,
+                    Err(_) => return true, // Invalid date, always show
+                };
+                // Check if both dates are in the same year and month
+                let in_same_month = month_start.year() == target_date.year() && month_start.month() == target_date.month();
+                eprintln!("Monthly_this_month todo '{}': month_start={}, target_date={}, in_same_month={}",
+                    todo.content, month_start_str, date_str, in_same_month);
+                return in_same_month;
+            }
+            return true; // No month_start, always show
+        }
+
         if todo.repeat_mode != "weekly" {
             return true; // Daily todos always show
         }
@@ -392,7 +681,10 @@ impl TodoStore {
         // Get the weekdays from the todo (e.g., "1,3,5")
         let weekdays_str = match &todo.weekdays {
             Some(w) => w,
-            None => return true, // No weekdays selected, always show
+            None => {
+                eprintln!("Weekly todo '{}' has no weekdays selected, hiding", todo.content);
+                return false; // No weekdays selected, don't show
+            }
         };
 
         // Parse the weekdays
@@ -421,10 +713,109 @@ impl TodoStore {
 
         eprintln!("Loading todos, checking for daily/weekly resets...");
 
+        // Update expired weekly_this_week and monthly_this_month todos to current week/month
+        // This ensures that "this week/month" todos continue to show after week/month boundaries
+        let current_week_monday = Self::current_week_monday();
+        let current_month_first = Self::current_month_first();
+        let mut parent_ids_to_reset_for_period: Vec<String> = Vec::new();
+
+        // First pass: identify parent todos that need period reset (week/month)
+        for todo in &todos {
+            // Only check parent todos
+            if todo.parent_id.is_some() {
+                continue;
+            }
+
+            // Check weekly_this_week todos
+            if todo.repeat_mode == "weekly_this_week" {
+                if let Some(week_start_str) = &todo.week_start {
+                    let week_start = match chrono::NaiveDate::parse_from_str(week_start_str, "%Y-%m-%d") {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    let current_week = match chrono::NaiveDate::parse_from_str(&current_week_monday, "%Y-%m-%d") {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    // If the stored week_start is before current week, mark for reset
+                    if week_start < current_week {
+                        eprintln!("=== [PERIOD RESET] Marking weekly_this_week todo '{}' for reset (week_start: {} -> {})",
+                            todo.content, week_start_str, current_week_monday);
+                        parent_ids_to_reset_for_period.push(todo.id.clone());
+                    }
+                }
+            }
+
+            // Check monthly_this_month todos
+            if todo.repeat_mode == "monthly_this_month" {
+                if let Some(month_start_str) = &todo.month_start {
+                    let month_start = match chrono::NaiveDate::parse_from_str(month_start_str, "%Y-%m-%d") {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    let current_month = match chrono::NaiveDate::parse_from_str(&current_month_first, "%Y-%m-%d") {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    // If the stored month_start is before current month, mark for reset
+                    if month_start < current_month {
+                        eprintln!("=== [PERIOD RESET] Marking monthly_this_month todo '{}' for reset (month_start: {} -> {})",
+                            todo.content, month_start_str, current_month_first);
+                        parent_ids_to_reset_for_period.push(todo.id.clone());
+                    }
+                }
+            }
+        }
+
+        // Second pass: apply period reset to parent todos AND their subtodos
+        if !parent_ids_to_reset_for_period.is_empty() {
+            eprintln!("=== [PERIOD RESET] Resetting {} parent todos and their subtodos for new period", parent_ids_to_reset_for_period.len());
+            let mut needs_save_for_period = false;
+
+            for todo in &mut todos {
+                let should_reset = if todo.parent_id.is_none() && parent_ids_to_reset_for_period.contains(&todo.id) {
+                    // This is a parent todo that needs period reset
+                    eprintln!("=== [PERIOD RESET] Resetting parent todo '{}' (id={}) for new period", todo.content, todo.id);
+
+                    // Update week_start or month_start
+                    if todo.repeat_mode == "weekly_this_week" {
+                        todo.week_start = Some(current_week_monday.clone());
+                    } else if todo.repeat_mode == "monthly_this_month" {
+                        todo.month_start = Some(current_month_first.clone());
+                    }
+
+                    todo.completed = false;
+                    todo.completed_at = None;
+                    todo.last_reset_date = Some(Self::today());
+                    true
+                } else if todo.parent_id.is_some() && parent_ids_to_reset_for_period.contains(&todo.parent_id.clone().unwrap_or_default()) {
+                    // This is a subtodo whose parent needs period reset
+                    eprintln!("=== [PERIOD RESET] Resetting subtodo '{}' for parent's new period", todo.content);
+                    todo.completed = false;
+                    todo.completed_at = None;
+                    true
+                } else {
+                    false
+                };
+
+                if should_reset {
+                    needs_save_for_period = true;
+                }
+            }
+
+            if needs_save_for_period {
+                eprintln!("Saving todos after period reset...");
+                self.save(&todos)?;
+            }
+        }
+
         // Apply daily and weekly reset logic (only when getting today's todos)
         let today_str = Self::today();
         let date_to_check = target_date.unwrap_or(&today_str);
         let is_today = date_to_check == today_str;
+
+        // Note: Expiry-based disabling is now handled dynamically below, not saved to file
+        // This allows todos to be re-enabled when viewing dates before the expiry date
 
         if is_today {
             let mut needs_save = false;
@@ -492,7 +883,7 @@ impl TodoStore {
             }
 
             // Second pass: apply resets to parent todos AND their subtodos
-            // For subtodos, only reset those that are NOT already completed
+            // All subtodos should be reset regardless of their completion status
             for todo in &mut todos {
                 let needs_reset = if todo.disabled {
                     // Skip disabled todos - they stay completed
@@ -506,16 +897,12 @@ impl TodoStore {
                     true
                 } else if todo.parent_id.is_some() && parent_ids_to_reset.contains(&todo.parent_id.clone().unwrap_or_default()) {
                     // This is a subtodo whose parent needs resetting
-                    // Only reset if NOT already completed - preserve completed subtodos!
-                    if !todo.completed {
-                        eprintln!("=== [RESET] Resetting subtodo '{}' (parent_id={:?}) for new cycle", todo.content, todo.parent_id);
-                        todo.completed = false;
-                        todo.completed_at = None;
-                        true
-                    } else {
-                        eprintln!("=== [RESET] Skipping already-completed subtodo '{}' (parent_id={:?})", todo.content, todo.parent_id);
-                        false
-                    }
+                    // Always reset subtodos regardless of their completion status
+                    eprintln!("=== [RESET] Resetting subtodo '{}' (parent_id={:?}, was_completed={}) for new cycle",
+                        todo.content, todo.parent_id, todo.completed);
+                    todo.completed = false;
+                    todo.completed_at = None;
+                    true
                 } else {
                     false
                 };
@@ -528,6 +915,55 @@ impl TodoStore {
             // Save if any todos were reset
             if needs_save {
                 eprintln!("Saving todos after daily/weekly resets...");
+                self.save(&todos)?;
+            }
+
+            let parent_repeat_modes: HashMap<String, String> = todos.iter()
+                .filter(|t| t.parent_id.is_none())
+                .map(|t| (t.id.clone(), t.repeat_mode.clone()))
+                .collect();
+
+            let mut subtodo_needs_save = false;
+            for todo in &mut todos {
+                if todo.parent_id.is_none() || todo.disabled {
+                    continue;
+                }
+
+                let Some(parent_id) = todo.parent_id.as_ref() else {
+                    continue;
+                };
+
+                let parent_repeat_mode = parent_repeat_modes.get(parent_id)
+                    .map(|mode| mode.as_str())
+                    .unwrap_or("");
+
+                // 子待办“按周几启用”的自动重置，只用于普通按日/按周循环。
+                // 对“本周内 / 本月内”父待办，完成状态应跟随周/月周期，不能每天刷回未完成。
+                if parent_repeat_mode == "weekly_this_week" || parent_repeat_mode == "monthly_this_month" {
+                    continue;
+                }
+
+                if !Self::is_subtodo_active_on_weekday(todo, current_weekday) {
+                    continue;
+                }
+
+                if todo.last_reset_date.as_deref() == Some(today_str.as_str()) {
+                    continue;
+                }
+
+                todo.completed = false;
+                todo.completed_at = None;
+                todo.last_reset_date = Some(today_str.clone());
+                subtodo_needs_save = true;
+            }
+
+            if subtodo_needs_save {
+                eprintln!("Saving todos after active subtodo weekday resets...");
+                self.save(&todos)?;
+            }
+
+            if Self::apply_cycle_activation_for_date(&mut todos, today_str.as_str()) {
+                eprintln!("Saving todos after cycle subtodo activation resets...");
                 self.save(&todos)?;
             }
         }
@@ -563,37 +999,403 @@ impl TodoStore {
         // - Daily parent todos and their subtodos: reset to incomplete
         // - Weekly todos and non-repeating todos: keep their state
         if !is_today {
-            eprintln!("Non-today view, adjusting completed status");
+            eprintln!("Non-today view ({}), adjusting completed status", date_to_check);
 
-            // First, collect IDs of daily repeating parent todos
-            let daily_parent_ids: std::collections::HashSet<String> = todos.iter()
-                .filter(|t| t.parent_id.is_none() && t.repeat_mode == "daily")
-                .map(|t| t.id.clone())
+            // Build a map of parent IDs to (repeat_mode, last_reset_date)
+            let parent_info: std::collections::HashMap<String, (String, Option<String>)> = todos.iter()
+                .filter(|t| t.parent_id.is_none())
+                .map(|t| (t.id.clone(), (t.repeat_mode.clone(), t.last_reset_date.clone())))
                 .collect();
 
-            eprintln!("Daily parent IDs: {:?}", daily_parent_ids);
-
             // Reset daily parent todos and their subtodos
+            // Reset if last_reset_date is not equal to the VIEW date (not today's date)
             for todo in &mut todos {
                 let should_reset = if todo.parent_id.is_none() {
-                    // Parent todo: reset if daily
-                    todo.repeat_mode == "daily"
+                    // Parent todo: reset if daily and last_reset_date != view date
+                    todo.repeat_mode == "daily" && todo.last_reset_date.as_ref().map_or(true, |d| d != date_to_check)
                 } else {
-                    // Subtodo: reset if its parent is daily
-                    todo.parent_id.as_ref().map_or(false, |pid| daily_parent_ids.contains(pid))
+                    // Subtodo: check if parent is daily and parent's last_reset_date != view date
+                    if let Some(parent_id) = &todo.parent_id {
+                        if let Some((parent_repeat_mode, parent_last_reset)) = parent_info.get(parent_id) {
+                            // Parent is daily and last_reset_date != view date (or never reset)
+                            parent_repeat_mode == "daily" && parent_last_reset.as_ref().map_or(true, |d| d != date_to_check)
+                        } else {
+                            // Parent not found (shouldn't happen)
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 };
 
                 if should_reset {
-                    eprintln!("Resetting todo '{}' (parent_id={:?}, repeat_mode={})",
-                        todo.content, todo.parent_id, todo.repeat_mode);
+                    eprintln!("Resetting todo '{}' (view_date={}, last_reset_date={:?})",
+                        todo.content, date_to_check, todo.last_reset_date);
                     todo.completed = false;
                 }
             }
         }
 
-        // Note: Sorting removed to preserve user's manual order via move up/down buttons
-        // The order is maintained as stored in the JSON file
+        for todo in &mut todos {
+            todo.inactive_by_weekday = false;
+        }
 
-        Ok(todos)
+        // Sort parent todos by priority (higher priority first, i.e., 1 > 2 > 3)
+        // When priorities are equal, maintain file order (which is what user controls via move up/down)
+        // Subtodos stay with their parents and maintain their order
+        let parent_todos_with_index: Vec<(usize, TodoItem)> = todos.iter()
+            .enumerate()
+            .filter(|(_, t)| t.parent_id.is_none())
+            .map(|(i, t)| (i, t.clone()))
+            .collect();
+
+        let mut parent_todos_sorted: Vec<(usize, TodoItem)> = parent_todos_with_index.clone();
+        parent_todos_sorted.sort_by(|a, b| {
+            // First compare by priority
+            match (b.1.priority, a.1.priority) {
+                (Some(p1), Some(p2)) => {
+                    // Same priority: use file index to maintain user's manual order
+                    match p1.cmp(&p2) {
+                        std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                        other => other,
+                    }
+                },
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (None, None) => {
+                    // Both have no priority: use file index (user's manual order)
+                    a.0.cmp(&b.0)
+                },
+            }
+        });
+
+        let parent_todos: Vec<TodoItem> = parent_todos_sorted.into_iter()
+            .map(|(_, t)| t)
+            .collect();
+
+        // Rebuild the todos list in sorted order
+        let mut sorted_todos = Vec::new();
+        for parent in &parent_todos {
+            // Add the parent todo
+            sorted_todos.push(parent.clone());
+            // Add all its subtodos
+            for todo in &todos {
+                if todo.parent_id.as_ref() == Some(&parent.id) {
+                    sorted_todos.push(todo.clone());
+                }
+            }
+        }
+
+        // Note: Sorting logic now includes priority-based sorting for parent todos
+        // while preserving user's manual order for todos with same priority
+
+        // Apply dynamic expiry-based disabling (not saved to file)
+        // This allows todos to be re-enabled when viewing earlier dates
+        // Note: expiry_date only applies to subtodos, not parent todos
+        for todo in &mut sorted_todos {
+            // Only check subtodos for expiry (parent todos don't have expiry_date)
+            if todo.parent_id.is_some() {
+                if let Some(cycle) = Self::cycle_window_for_date(todo, date_to_check) {
+                    if cycle.active {
+                        todo.expiry_date = Some(cycle.window_end.format("%Y-%m-%d").to_string());
+                    } else if !todo.disabled {
+                        todo.expiry_date = None;
+                        todo.inactive_by_weekday = true;
+                        todo.completed = true;
+                        continue;
+                    }
+                }
+
+                if let Some(expiry) = &todo.expiry_date {
+                    // Check if view date is past expiry date
+                    if date_to_check > expiry.as_str() {
+                        // Dynamically disable this expired subtodo
+                        todo.disabled = true;
+                        todo.completed = true;
+                    }
+                }
+
+                if !todo.disabled && !Self::is_subtodo_active_on_date(todo, date_to_check) {
+                    todo.inactive_by_weekday = true;
+                    todo.completed = true;
+                }
+            }
+        }
+
+        // After dynamic disabling, check if parent todos should be marked as completed
+        // when all their subtodos are completed or disabled
+        // First, collect parent IDs that need to be marked as completed
+        let parent_ids_to_complete: Vec<String> = sorted_todos.iter()
+            .filter(|t| t.parent_id.is_none())
+            .filter(|parent| {
+                // Check if all subtodos are completed or disabled
+                sorted_todos.iter()
+                    .filter(|t| t.parent_id.as_deref() == Some(&parent.id))
+                    .all(|t| is_effectively_done_for_date(t, date_to_check))
+            })
+            .map(|t| t.id.clone())
+            .collect();
+
+        // Then, mark those parents as completed
+        for todo in &mut sorted_todos {
+            if parent_ids_to_complete.contains(&todo.id) {
+                todo.completed = true;
+            }
+        }
+
+        Ok(sorted_todos)
+    }
+}
+
+/// Long term todo item - persistent todos without time limits
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LongTermTodo {
+    pub id: String,
+    pub content: String,
+    pub completed: bool,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "completedAt")]
+    pub completed_at: Option<i64>,
+}
+
+impl LongTermTodo {
+    pub fn new(content: String) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            content,
+            completed: false,
+            created_at: Local::now().timestamp(),
+            completed_at: None,
+        }
+    }
+}
+
+/// Store for long term todos
+pub struct LongTermTodoStore {
+    file_path: PathBuf,
+}
+
+impl LongTermTodoStore {
+    /// Create a new LongTermTodoStore with the specified file path
+    pub fn new(config_dir: PathBuf) -> Self {
+        let file_path = config_dir.join("long_term_todos.json");
+        // Ensure the directory exists
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        Self { file_path }
+    }
+
+    /// Load all long term todos from the JSON file
+    pub fn load(&self) -> Result<Vec<LongTermTodo>, String> {
+        if !self.file_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read_to_string(&self.file_path)
+            .map_err(|e| format!("Failed to read long term todos file: {}", e))?;
+
+        if content.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse long term todos: {}", e))
+    }
+
+    /// Save long term todos to the JSON file
+    pub fn save(&self, todos: &[LongTermTodo]) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(todos)
+            .map_err(|e| format!("Failed to serialize long term todos: {}", e))?;
+
+        write_json_atomically(&self.file_path, &json)
+    }
+
+    /// Add a new long term todo
+    pub fn add(&self, content: String) -> Result<LongTermTodo, String> {
+        let mut todos = self.load()?;
+        let new_todo = LongTermTodo::new(content);
+        todos.push(new_todo.clone());
+        self.save(&todos)?;
+        Ok(new_todo)
+    }
+
+    /// Toggle completion status of a long term todo
+    pub fn toggle(&self, id: &str) -> Result<LongTermTodo, String> {
+        let mut todos = self.load()?;
+        let todo = todos.iter_mut()
+            .find(|t| t.id == id)
+            .ok_or_else(|| format!("Long term todo not found: {}", id))?;
+
+        todo.completed = !todo.completed;
+        if todo.completed {
+            todo.completed_at = Some(Local::now().timestamp());
+        } else {
+            todo.completed_at = None;
+        }
+
+        let updated_todo = todo.clone();
+        self.save(&todos)?;
+        Ok(updated_todo)
+    }
+
+    /// Delete a long term todo
+    pub fn delete(&self, id: &str) -> Result<(), String> {
+        let mut todos = self.load()?;
+        let original_len = todos.len();
+        todos.retain(|t| t.id != id);
+
+        if todos.len() == original_len {
+            return Err(format!("Long term todo not found: {}", id));
+        }
+
+        self.save(&todos)?;
+        Ok(())
+    }
+
+    /// Move a long term todo up in the list
+    pub fn move_up(&self, id: &str) -> Result<(), String> {
+        let mut todos = self.load()?;
+        let len = todos.len();
+
+        for i in 1..len {
+            if todos[i].id == id {
+                todos.swap(i, i - 1);
+                self.save(&todos)?;
+                return Ok(());
+            }
+        }
+
+        Err(format!("Cannot move up: {}", id))
+    }
+
+    /// Move a long term todo down in the list
+    pub fn move_down(&self, id: &str) -> Result<(), String> {
+        let mut todos = self.load()?;
+        let len = todos.len();
+
+        for i in 0..len.saturating_sub(1) {
+            if todos[i].id == id {
+                todos.swap(i, i + 1);
+                self.save(&todos)?;
+                return Ok(());
+            }
+        }
+
+        Err(format!("Cannot move down: {}", id))
+    }
+
+    /// Update a long term todo's content
+    pub fn update(&self, id: &str, content: &str) -> Result<(), String> {
+        let mut todos = self.load()?;
+        let todo = todos.iter_mut()
+            .find(|t| t.id == id)
+            .ok_or_else(|| format!("Long term todo not found: {}", id))?;
+
+        todo.content = content.to_string();
+        self.save(&todos)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn todo_store_for_test(name: &str) -> TodoStore {
+        let dir = std::env::temp_dir().join(format!("lighttodo_cycle_test_{}_{}", name, Uuid::new_v4()));
+        TodoStore::new(dir)
+    }
+
+    fn parent_todo(id: &str) -> TodoItem {
+        let mut todo = TodoItem::new("父待办".to_string(), "daily".to_string(), None, None);
+        todo.id = id.to_string();
+        todo
+    }
+
+    fn cyclic_subtodo(id: &str, parent_id: &str) -> TodoItem {
+        let mut todo = TodoItem::new(
+            "周期子待办".to_string(),
+            "none".to_string(),
+            None,
+            Some(parent_id.to_string()),
+        );
+        todo.id = id.to_string();
+        todo.cycle_start_date = Some("2026-07-14".to_string());
+        todo.cycle_active_days = Some(7);
+        todo.cycle_interval_weeks = Some(4);
+        todo
+    }
+
+    #[test]
+    fn cycle_subtodo_is_active_inside_window_and_gets_runtime_expiry_date() {
+        let store = todo_store_for_test("active_window");
+        let parent = parent_todo("parent-1");
+        let child = cyclic_subtodo("child-1", "parent-1");
+        store.save(&[parent, child]).unwrap();
+
+        let todos = store.get_todos(Some("2026-07-15")).unwrap();
+        let child = todos.iter().find(|todo| todo.id == "child-1").unwrap();
+
+        assert!(!child.disabled);
+        assert!(!child.inactive_by_weekday);
+        assert!(!child.completed);
+        assert_eq!(child.expiry_date.as_deref(), Some("2026-07-20"));
+    }
+
+    #[test]
+    fn cycle_subtodo_is_inactive_between_windows_without_persisting_disabled() {
+        let store = todo_store_for_test("inactive_window");
+        let parent = parent_todo("parent-1");
+        let child = cyclic_subtodo("child-1", "parent-1");
+        store.save(&[parent, child]).unwrap();
+
+        let todos = store.get_todos(Some("2026-07-21")).unwrap();
+        let child = todos.iter().find(|todo| todo.id == "child-1").unwrap();
+        let saved = store.load().unwrap();
+        let saved_child = saved.iter().find(|todo| todo.id == "child-1").unwrap();
+
+        assert!(!child.disabled);
+        assert!(child.inactive_by_weekday);
+        assert!(child.completed);
+        assert_eq!(child.expiry_date, None);
+        assert!(!saved_child.disabled);
+        assert!(!saved_child.completed);
+    }
+
+    #[test]
+    fn cycle_subtodo_resets_when_a_new_active_cycle_starts() {
+        let mut todos = vec![parent_todo("parent-1"), cyclic_subtodo("child-1", "parent-1")];
+        todos[0].completed = true;
+        todos[0].completed_at = Some(1_784_035_200);
+        todos[1].completed = true;
+        todos[1].completed_at = Some(1_784_035_200);
+        todos[1].last_reset_date = Some("2026-07-14".to_string());
+
+        let changed = TodoStore::apply_cycle_activation_for_date(&mut todos, "2026-08-11");
+        let parent = todos.iter().find(|todo| todo.id == "parent-1").unwrap();
+        let child = todos.iter().find(|todo| todo.id == "child-1").unwrap();
+
+        assert!(changed);
+        assert!(!parent.completed);
+        assert_eq!(parent.completed_at, None);
+        assert!(!child.completed);
+        assert_eq!(child.completed_at, None);
+        assert_eq!(child.last_reset_date.as_deref(), Some("2026-08-11"));
+    }
+
+    #[test]
+    fn atomic_json_write_replaces_file_and_keeps_previous_backup() {
+        let dir = std::env::temp_dir().join(format!("lighttodo_atomic_write_{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("todos.json");
+        fs::write(&file_path, "[{\"old\":true}]").unwrap();
+
+        write_json_atomically(&file_path, "[{\"new\":true}]").unwrap();
+
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "[{\"new\":true}]");
+        assert_eq!(fs::read_to_string(dir.join("todos.json.bak")).unwrap(), "[{\"old\":true}]");
+        assert!(!dir.join("todos.json.tmp").exists());
     }
 }

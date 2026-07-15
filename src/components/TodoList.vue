@@ -1,5 +1,5 @@
-<script setup lang="ts">
-import { computed } from 'vue';
+﻿<script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import type { TodoItem as TodoItemType } from '../types/todo';
 import TodoItem from './TodoItem.vue';
 
@@ -18,12 +18,64 @@ const emit = defineEmits<{
   (e: 'toggle-parent', id: string): void;
   (e: 'move-up', id: string): void;
   (e: 'move-down', id: string): void;
-  (e: 'complete-early', id: string): void;
   (e: 'toggle-disable', id: string): void;
 }>();
 
-const incompleteTodos = computed(() => props.todos.filter((t) => !t.completed));
-const completedTodos = computed(() => props.todos.filter((t) => t.completed));
+const activeTodos = computed(() => props.todos);
+
+const COMPLETE_SINK_DELAY_MS = 3000;
+const nowTick = ref(Date.now());
+let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+
+const normalizeTimestampMs = (timestamp?: number) => {
+  if (!timestamp) return null;
+  return timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp;
+};
+
+const clearPendingTimer = () => {
+  if (pendingTimer) {
+    clearTimeout(pendingTimer);
+    pendingTimer = null;
+  }
+};
+
+const isPendingSink = (todo: TodoItemType) => {
+  if (!todo.completed) return false;
+  const completedAtMs = normalizeTimestampMs(todo.completedAt);
+  if (!completedAtMs) return false;
+  return nowTick.value - completedAtMs < COMPLETE_SINK_DELAY_MS;
+};
+
+const scheduleRefresh = () => {
+  clearPendingTimer();
+  const now = Date.now();
+  const pendingTodos = activeTodos.value
+    .map((t) => ({ todo: t, completedAtMs: normalizeTimestampMs(t.completedAt) }))
+    .filter(({ todo, completedAtMs }) => todo.completed && completedAtMs && now - completedAtMs < COMPLETE_SINK_DELAY_MS);
+  if (pendingTodos.length === 0) return;
+  const nextExpireMs = Math.min(...pendingTodos.map(({ completedAtMs }) => COMPLETE_SINK_DELAY_MS - (now - (completedAtMs || 0))));
+  pendingTimer = setTimeout(() => {
+    nowTick.value = Date.now();
+    pendingTimer = null;
+    scheduleRefresh();
+  }, Math.max(0, nextExpireMs));
+};
+
+watch(
+  () => props.todos,
+  () => {
+    nowTick.value = Date.now();
+    scheduleRefresh();
+  },
+  { immediate: true, deep: true }
+);
+
+onBeforeUnmount(() => {
+  clearPendingTimer();
+});
+
+const incompleteTodos = computed(() => activeTodos.value.filter((t) => !t.completed || isPendingSink(t)));
+const completedTodos = computed(() => activeTodos.value.filter((t) => t.completed && !isPendingSink(t)));
 </script>
 
 <template>
@@ -35,14 +87,14 @@ const completedTodos = computed(() => props.todos.filter((t) => t.completed));
 
     <template v-else>
       <!-- Empty state (only when truly no todos at all) -->
-      <div v-if="todos.length === 0" class="todo-list-empty">
+      <div v-if="activeTodos.length === 0" class="todo-list-empty">
         <div class="empty-icon">📝</div>
         <p>还没有待办事项</p>
         <p class="empty-hint">添加你的第一个待办吧！</p>
       </div>
 
       <!-- Incomplete todos section (always shown when there are any todos) -->
-      <div v-if="todos.length > 0" class="todo-list-section">
+      <div v-if="activeTodos.length > 0" class="todo-list-section">
         <h3 class="todo-list-section-title">未完成</h3>
         <div v-if="incompleteTodos.length === 0" class="todo-list-section-empty">
           暂无未完成的待办
@@ -63,14 +115,13 @@ const completedTodos = computed(() => props.todos.filter((t) => t.completed));
             @toggle-parent="emit('toggle-parent', $event)"
             @move-up="emit('move-up', $event)"
             @move-down="emit('move-down', $event)"
-            @complete-early="emit('complete-early', $event)"
             @toggle-disable="emit('toggle-disable', $event)"
           />
         </div>
       </div>
 
       <!-- Completed todos section (always shown when there are any todos) -->
-      <div v-if="todos.length > 0" class="todo-list-section completed">
+      <div v-if="activeTodos.length > 0" class="todo-list-section completed">
         <h3 class="todo-list-section-title">已完成</h3>
         <div v-if="completedTodos.length === 0" class="todo-list-section-empty">
           暂无已完成的待办
@@ -81,7 +132,7 @@ const completedTodos = computed(() => props.todos.filter((t) => t.completed));
             :key="todo.id"
             :todo="todo"
             :parent-index="incompleteTodos.length + index"
-            :parent-total="todos.length"
+            :parent-total="activeTodos.length"
             :is-today="isToday"
             @toggle="emit('toggle', $event)"
             @delete="emit('delete', $event)"
@@ -91,11 +142,11 @@ const completedTodos = computed(() => props.todos.filter((t) => t.completed));
             @toggle-parent="emit('toggle-parent', $event)"
             @move-up="emit('move-up', $event)"
             @move-down="emit('move-down', $event)"
-            @complete-early="emit('complete-early', $event)"
             @toggle-disable="emit('toggle-disable', $event)"
           />
         </div>
       </div>
+
     </template>
   </div>
 </template>
@@ -169,14 +220,21 @@ const completedTodos = computed(() => props.todos.filter((t) => t.completed));
   border-top: 1px solid var(--border-color);
 }
 
+.todo-list-section.completed .todo-list-section-title {
+  color: #22c55e;
+}
+
 .todo-list-section-title {
-  font-size: 14px;
+  font-size: 18px;
   font-weight: 600;
-  color: var(--text-secondary);
+  color: #f59e0b;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin: 0;
   padding-left: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  display: inline-block;
 }
 
 .todo-list-items {
@@ -194,16 +252,23 @@ const completedTodos = computed(() => props.todos.filter((t) => t.completed));
 }
 
 :root {
+  --text-primary: #212529;
   --text-secondary: #6c757d;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8f9fa;
   --border-color: #dee2e6;
   --primary-color: #4f46e5;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --text-primary: #f8f9fa;
     --text-secondary: #adb5bd;
+    --bg-primary: #1e1e1e;
+    --bg-secondary: #2d2d2d;
     --border-color: #495057;
     --primary-color: #6366f1;
   }
 }
+
 </style>

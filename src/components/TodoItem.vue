@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { TodoItem as TodoItemType } from '../types/todo';
-import { computed } from 'vue';
+import { useSettings } from '../composables/useSettings';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import ArrowIcon from './ArrowIcon.vue';
 
 const props = defineProps<{
   todo: TodoItemType;
@@ -21,12 +23,27 @@ const emit = defineEmits<{
   (e: 'toggle-parent', id: string): void;
   (e: 'move-up', id: string): void;
   (e: 'move-down', id: string): void;
-  (e: 'complete-early', id: string): void;
   (e: 'toggle-disable', id: string): void;
 }>();
+const { settings } = useSettings();
+const defaultPriorityColors = {
+  1: '#ef4444',
+  2: '#f59e0b',
+  3: '#22c55e'
+};
+
+const getPriorityColor = (priority: number) => {
+  return settings.value?.priorityColors?.[priority as keyof typeof settings.value.priorityColors] || defaultPriorityColors[priority as keyof typeof defaultPriorityColors];
+};
 
 // Check if this is a subtodo (has parentId)
 const isSubtodo = computed(() => !!props.todo.parentId);
+
+// Check if this is a weekly_this_week todo
+const isWeeklyThisWeek = computed(() => props.todo.repeatMode === 'weekly_this_week' && !props.todo.parentId);
+
+// Check if this is a monthly_this_month todo
+const isMonthlyThisMonth = computed(() => props.todo.repeatMode === 'monthly_this_month' && !props.todo.parentId);
 
 // Can move up? (subtodo and not first, or parent and not first)
 const canMoveUp = computed(() => {
@@ -45,22 +62,43 @@ const canMoveDown = computed(() => {
 });
 
 // Can toggle completion? (only if it's today)
-const canToggle = computed(() => props.isToday !== false);
+const canToggle = computed(() => {
+  return props.isToday === true;
+});
 
 // Check if this todo is disabled
-const isDisabled = computed(() => props.todo.disabled === true);
+const isInactiveByWeekday = computed(() => props.todo.inactiveByWeekday === true);
+const isDisabled = computed(() => props.todo.disabled === true || isInactiveByWeekday.value);
 
 // Can operate? (disabled todos cannot be operated on)
 const canOperate = computed(() => !isDisabled.value);
 
-// Check if this todo should show the complete early button
-const showCompleteEarlyButton = computed(() => {
-  if (props.todo.completed) return false;
-  // Parent weekly todo
-  if (!isSubtodo.value && props.todo.repeatMode === 'weekly') return true;
-  // Subtodo with weekly parent
-  if (isSubtodo.value && props.parentRepeatMode === 'weekly') return true;
-  return false;
+// Can edit? (not completed and can operate)
+const canEdit = computed(() => !props.todo.completed && canOperate.value);
+const statusBadgeText = computed(() => {
+  if (isInactiveByWeekday.value) return '本日未启用';
+  if (props.todo.disabled) return '已禁用';
+  return '';
+});
+
+// Should disable checkbox? (same logic as handleCheckboxClick)
+const shouldDisableCheckbox = computed(() => {
+  if (isDisabled.value) return true;
+  // Always allow undoing
+  if (props.todo.completed && !isInactiveByWeekday.value) return false;
+  // Allow on today's view
+  if (canToggle.value) return false;
+  // For subtodos, check parent's repeat mode
+  if (isSubtodo.value) {
+    // If parent is daily/weekly repeating, disable on non-today view
+    if (props.parentRepeatMode === 'daily' || props.parentRepeatMode === 'weekly') {
+      return true;
+    }
+    // Parent is non-repeating, allow
+    return false;
+  }
+  // Parent todo on non-today view
+  return true;
 });
 
 const weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
@@ -68,12 +106,90 @@ const weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
 const repeatModeLabels: Record<TodoItemType['repeatMode'], string> = {
   daily: '每天重复',
   weekly: '每周重复',
+  weekly_this_week: '本周内',
+  monthly_this_month: '本月内',
   specific_dates: '指定日期',
   none: '不重复',
 };
 
-// Check if this todo has subtodos
-const hasSubtodos = computed(() => props.todo.subtodos && props.todo.subtodos.length > 0);
+const allSubtodos = computed(() => props.todo.subtodos || []);
+const COMPLETE_SINK_DELAY_MS = 3000;
+const sortTick = ref(Date.now());
+const disabledSubtodosExpanded = ref(false);
+let pendingSortTimer: ReturnType<typeof setTimeout> | null = null;
+
+const normalizeTimestampMs = (timestamp?: number) => {
+  if (!timestamp) return null;
+  return timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp;
+};
+
+const clearPendingSortTimer = () => {
+  if (pendingSortTimer) {
+    clearTimeout(pendingSortTimer);
+    pendingSortTimer = null;
+  }
+};
+
+const isPendingSinkByCompletedAt = (todo: TodoItemType) => {
+  if (!todo.completed) return false;
+  const completedAtMs = normalizeTimestampMs(todo.completedAt);
+  if (!completedAtMs) return false;
+  return sortTick.value - completedAtMs < COMPLETE_SINK_DELAY_MS;
+};
+
+const scheduleSubtodoSortRefresh = () => {
+  clearPendingSortTimer();
+  const now = Date.now();
+  const pendingTodos = allSubtodos.value
+    .map((t) => ({ todo: t, completedAtMs: normalizeTimestampMs(t.completedAt) }))
+    .filter(({ todo, completedAtMs }) => todo.completed && completedAtMs && now - completedAtMs < COMPLETE_SINK_DELAY_MS);
+  if (pendingTodos.length === 0) return;
+  const nextExpireMs = Math.min(...pendingTodos.map(({ completedAtMs }) => COMPLETE_SINK_DELAY_MS - (now - (completedAtMs || 0))));
+  pendingSortTimer = setTimeout(() => {
+    sortTick.value = Date.now();
+    pendingSortTimer = null;
+    scheduleSubtodoSortRefresh();
+  }, Math.max(0, nextExpireMs));
+};
+
+watch(
+  allSubtodos,
+  () => {
+    sortTick.value = Date.now();
+    scheduleSubtodoSortRefresh();
+  },
+  { immediate: true, deep: true }
+);
+
+onBeforeUnmount(() => {
+  clearPendingSortTimer();
+});
+
+watch(
+  () => props.todo.id,
+  () => {
+    disabledSubtodosExpanded.value = false;
+  },
+  { immediate: true }
+);
+
+const activeSubtodos = computed(() => {
+  return [...allSubtodos.value].sort((a, b) => {
+    if (a.disabled !== b.disabled) return a.disabled ? 1 : -1;
+    const aPending = isPendingSinkByCompletedAt(a);
+    const bPending = isPendingSinkByCompletedAt(b);
+    const aEffectiveCompleted = a.completed && !aPending;
+    const bEffectiveCompleted = b.completed && !bPending;
+    if (aEffectiveCompleted !== bEffectiveCompleted) return aEffectiveCompleted ? 1 : -1;
+    return 0;
+  });
+});
+
+// Check if this todo has visible subtodos
+const hasSubtodos = computed(() => activeSubtodos.value.length > 0);
+const isSubtodoDisabled = (todo: TodoItemType) => todo.disabled === true || todo.inactiveByWeekday === true;
+const enabledSubtodos = computed(() => activeSubtodos.value.filter((todo) => !isSubtodoDisabled(todo)));
+const disabledSubtodos = computed(() => activeSubtodos.value.filter((todo) => isSubtodoDisabled(todo)));
 
 // Format weekly display with selected weekdays
 const weeklyDisplayText = computed(() => {
@@ -115,10 +231,30 @@ const repeatModeDisplay = computed(() => {
   return repeatModeLabels[props.todo.repeatMode];
 });
 
+// Format expiry date display
+const expiryDateDisplay = computed(() => {
+  if (!props.todo.expiryDate) return '';
+  const date = new Date(props.todo.expiryDate + 'T00:00:00');
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+});
+
+// Check if expiry date is in the past (expired)
+const isExpired = computed(() => {
+  if (!props.todo.expiryDate) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const expiryDate = new Date(props.todo.expiryDate + 'T00:00:00');
+  return expiryDate < today;
+});
+
 // Handle checkbox click - emit toggle-parent for parent todos with subtodos
 const handleCheckboxClick = (e: Event) => {
   // Prevent default checkbox behavior - we'll control state manually
   e.preventDefault();
+  e.stopPropagation();
 
   // Disabled todos cannot be toggled
   if (isDisabled.value) {
@@ -128,12 +264,26 @@ const handleCheckboxClick = (e: Event) => {
   // Allow toggling in these cases:
   // 1. Always allow undoing (completed -> uncompleted)
   // 2. Allow completing on today's view
-  // 3. For subtodos (isSubtodo), always allow toggling since they don't have repeat mode
-  const canToggleNow = props.todo.completed || canToggle.value || isSubtodo.value;
+  // 3. For subtodos, check parent's repeat mode:
+  //    - If parent is daily/weekly repeating, only allow on today's view
+  //    - If parent is non-repeating, allow anytime
+  let canToggleNow = props.todo.completed || canToggle.value;
+
+  if (isSubtodo.value && !canToggleNow) {
+    // Subtodo: check if parent is repeating
+    if (props.parentRepeatMode === 'daily' || props.parentRepeatMode === 'weekly') {
+      // Parent is repeating, only allow on today's view
+      canToggleNow = false;
+    } else {
+      // Parent is non-repeating, allow toggling
+      canToggleNow = true;
+    }
+  }
 
   if (!canToggleNow) {
     return;
   }
+
   if (hasSubtodos.value && !props.todo.completed) {
     // Parent todo with subtodos - emit toggle-parent for confirmation
     emit('toggle-parent', props.todo.id);
@@ -142,35 +292,64 @@ const handleCheckboxClick = (e: Event) => {
     emit('toggle', props.todo.id);
   }
 };
+
+// Handle clicking on the todo item (not on buttons/checkbox)
+const handleTodoItemClick = (e: Event) => {
+  // Only handle for parent todos with subtodos
+  if (!isSubtodo.value && hasSubtodos.value) {
+    // Check if the click target is a button or checkbox
+    const target = e.target as HTMLElement;
+    if (target.closest('button') || target.closest('.todo-item-checkbox') || target.closest('.toggle-switch')) {
+      return; // Don't toggle if clicking on buttons/checkbox
+    }
+    // Toggle expand/collapse
+    emit('toggle-expand', props.todo.id);
+  }
+};
 </script>
 
 <template>
-  <div class="todo-item-wrapper">
+  <div class="todo-item-wrapper" :id="!isSubtodo ? `todo-${todo.id}` : undefined" :data-priority="todo.priority" :class="{ 'has-priority': todo.priority, 'weekly-this-week': isWeeklyThisWeek, 'monthly-this-month': isMonthlyThisMonth }">
     <div
       class="todo-item"
       :class="{
         completed: todo.completed,
         'is-subtodo': isSubtodo,
         'non-today': !canToggle,
-        'is-disabled': isDisabled
+        'is-disabled': isDisabled,
+        'has-subtodos': hasSubtodos
       }"
+      @click="handleTodoItemClick"
     >
-      <label class="todo-item-checkbox" :class="{ 'checkbox-disabled': !canToggle || isDisabled }">
+      <label v-if="!isDisabled" class="todo-item-checkbox" :class="{ 'checkbox-disabled': shouldDisableCheckbox }">
         <input
           type="checkbox"
           :checked="todo.completed"
-          @click="handleCheckboxClick"
-          :disabled="!canToggle || isDisabled"
+          @click.prevent.stop="handleCheckboxClick"
         />
-        <span class="checkbox-icon">
+        <span class="checkbox-icon" @click.prevent.stop="handleCheckboxClick">
           <span class="icon-unchecked">⃞</span>
           <span class="icon-checked">✅</span>
         </span>
       </label>
+      <span v-if="statusBadgeText" class="todo-item-status-badge">{{ statusBadgeText }}</span>
+      <!-- Expiry date icon (for both parent todos and subtodos) - separate column -->
+      <span v-if="todo.expiryDate" class="todo-item-expiry-icon-wrapper">
+        <span class="todo-item-expiry-icon" :class="{ 'is-expired': isExpired }">📅</span>
+        <span class="expiry-tooltip">
+          截止日期：{{ expiryDateDisplay }}<span v-if="isExpired">（已过期）</span>
+        </span>
+      </span>
       <div class="todo-item-content">
-        <span class="todo-item-text">{{ todo.content }}</span>
+        <span class="todo-item-text" :style="todo.priority && !isSubtodo ? { color: getPriorityColor(todo.priority) } : undefined">{{ todo.content }}</span>
         <span v-if="!isSubtodo" class="todo-item-meta">
+          <span v-if="todo.priority" class="priority-mark" :style="{ background: getPriorityColor(todo.priority) }">
+            P{{ todo.priority }}
+          </span>
           <span class="todo-item-repeat">{{ repeatModeDisplay }}</span>
+          <span v-if="hasSubtodos" class="todo-item-subtodo-count">
+            {{ activeSubtodos.length }} 个子待办
+          </span>
         </span>
       </div>
       <div class="todo-item-actions">
@@ -179,11 +358,11 @@ const handleCheckboxClick = (e: Event) => {
           v-if="canMoveUp"
           type="button"
           class="todo-item-move-up"
-          @click.prevent="emit('move-up', todo.id)"
+          @click.prevent.stop="emit('move-up', todo.id)"
           aria-label="上移"
           title="上移"
         >
-          ↑
+          <ArrowIcon direction="up" />
         </button>
 
         <!-- Move down button -->
@@ -191,11 +370,11 @@ const handleCheckboxClick = (e: Event) => {
           v-if="canMoveDown"
           type="button"
           class="todo-item-move-down"
-          @click.prevent="emit('move-down', todo.id)"
+          @click.prevent.stop="emit('move-down', todo.id)"
           aria-label="下移"
           title="下移"
         >
-          ↓
+          <ArrowIcon direction="down" />
         </button>
 
         <!-- Disable/Enable toggle switch -->
@@ -203,49 +382,27 @@ const handleCheckboxClick = (e: Event) => {
           type="button"
           class="toggle-switch"
           :class="{ 'active': !isDisabled }"
-          @click.prevent="emit('toggle-disable', todo.id)"
+          @click.prevent.stop="emit('toggle-disable', todo.id)"
           :aria-label="isDisabled ? '启用' : '禁用'"
           :title="isDisabled ? '启用（恢复操作）' : '禁用（标记完成并禁止操作）'"
         >
           <span class="toggle-slider"></span>
         </button>
 
-        <!-- Complete early button for weekly todos and their subtodos (always visible) -->
-        <button
-          v-if="showCompleteEarlyButton"
-          type="button"
-          class="todo-item-complete-early"
-          @click.prevent="emit('complete-early', todo.id)"
-          aria-label="提前完成"
-          title="提前完成"
-        >
-          ⏩
-        </button>
-
-        <!-- Expand/collapse button for parent todos -->
-        <button
-          v-if="hasSubtodos"
-          class="todo-item-expand"
-          @click="emit('toggle-expand', todo.id)"
-          :title="todo.expanded ? '收起' : '展开'"
-        >
-          {{ todo.expanded ? '🔽' : '🔼' }}
-        </button>
-
         <!-- Add subtodo button for parent todos -->
         <button
           v-if="!isSubtodo && !todo.completed && canOperate"
           class="todo-item-add-sub"
-          @click="emit('add-subtodo', todo.id)"
+          @click.prevent.stop="emit('add-subtodo', todo.id)"
           title="添加子待办"
         >
           ➕
         </button>
 
         <button
-          v-if="!todo.completed && canOperate"
+          v-if="canEdit"
           class="todo-item-edit"
-          @click="emit('edit', todo.id)"
+          @click.prevent.stop="emit('edit', todo.id)"
           aria-label="编辑"
           title="编辑"
         >
@@ -254,7 +411,7 @@ const handleCheckboxClick = (e: Event) => {
         <button
           v-if="canOperate"
           class="todo-item-delete"
-          @click="emit('delete', todo.id)"
+          @click.prevent.stop="emit('delete', todo.id)"
           aria-label="删除"
           title="删除"
         >
@@ -266,11 +423,11 @@ const handleCheckboxClick = (e: Event) => {
     <!-- Recursive subtodos rendering -->
     <div v-if="hasSubtodos && todo.expanded" class="subtodos-container">
       <TodoItem
-        v-for="(subtodo, index) in todo.subtodos"
+        v-for="(subtodo, index) in enabledSubtodos"
         :key="subtodo.id"
         :todo="subtodo"
         :subtodo-index="index"
-        :subtodo-total="todo.subtodos?.length"
+        :subtodo-total="enabledSubtodos.length"
         :parent-index="parentIndex"
         :parent-total="parentTotal"
         :is-today="isToday"
@@ -283,9 +440,51 @@ const handleCheckboxClick = (e: Event) => {
         @toggle-parent="(id) => emit('toggle-parent', id)"
         @move-up="(id) => emit('move-up', id)"
         @move-down="(id) => emit('move-down', id)"
-        @complete-early="(id) => emit('complete-early', id)"
         @toggle-disable="(id) => emit('toggle-disable', id)"
       />
+
+      <div
+        v-if="disabledSubtodos.length > 0"
+        class="disabled-subtodos-group"
+      >
+        <button
+          type="button"
+          class="disabled-subtodos-toggle"
+          :class="{ expanded: disabledSubtodosExpanded }"
+          @click.prevent.stop="disabledSubtodosExpanded = !disabledSubtodosExpanded"
+        >
+          <span class="disabled-subtodos-toggle-left">
+            <span class="disabled-subtodos-badge">已禁用</span>
+            <span class="disabled-subtodos-title">
+              {{ disabledSubtodosExpanded ? '收起禁用子待办' : `展开禁用子待办（${disabledSubtodos.length}项）` }}
+            </span>
+          </span>
+          <span class="disabled-subtodos-arrow">{{ disabledSubtodosExpanded ? '▾' : '▸' }}</span>
+        </button>
+
+        <div v-if="disabledSubtodosExpanded" class="disabled-subtodos-list">
+          <TodoItem
+            v-for="(subtodo, index) in disabledSubtodos"
+            :key="subtodo.id"
+            :todo="subtodo"
+            :subtodo-index="enabledSubtodos.length + index"
+            :subtodo-total="activeSubtodos.length"
+            :parent-index="parentIndex"
+            :parent-total="parentTotal"
+            :is-today="isToday"
+            :parent-repeat-mode="todo.repeatMode"
+            @toggle="(id) => emit('toggle', id)"
+            @delete="(id) => emit('delete', id)"
+            @edit="(id) => emit('edit', id)"
+            @toggle-expand="(id) => emit('toggle-expand', id)"
+            @add-subtodo="(parentId) => emit('add-subtodo', parentId)"
+            @toggle-parent="(id) => emit('toggle-parent', id)"
+            @move-up="(id) => emit('move-up', id)"
+            @move-down="(id) => emit('move-down', id)"
+            @toggle-disable="(id) => emit('toggle-disable', id)"
+          />
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -295,6 +494,31 @@ const handleCheckboxClick = (e: Event) => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.todo-item-wrapper.weekly-this-week {
+  border-left: 4px solid #9333ea;
+  padding-left: 8px;
+  margin-left: 0;
+}
+
+.todo-item-wrapper.monthly-this-month {
+  border-left: 4px solid #ec4899;
+  padding-left: 8px;
+  margin-left: 0;
+}
+
+.priority-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: white;
+  font-size: 12px;
+  font-weight: 500;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .todo-item {
@@ -342,9 +566,9 @@ const handleCheckboxClick = (e: Event) => {
 
 .todo-item.is-disabled::before {
   content: '已禁用';
-  position: absolute;
-  top: 4px;
-  right: 4px;
+  position: static;
+  order: -1;
+  flex-shrink: 0;
   font-size: 10px;
   padding: 2px 6px;
   background: #fb923c;
@@ -357,17 +581,117 @@ const handleCheckboxClick = (e: Event) => {
   color: #c2410c;
 }
 
+/* Override the legacy disabled pseudo-badge so it no longer occupies layout space. */
+.todo-item.is-disabled::before {
+  content: none !important;
+  display: none !important;
+}
+
+.todo-item-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #fb923c;
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.todo-item.has-subtodos {
+  cursor: pointer;
+}
+
+.todo-item.has-subtodos:hover {
+  background: var(--bg-secondary);
+}
+
+.todo-item-subtodo-count {
+  font-size: 12px;
+  color: #6366f1;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.todo-item-expiry-icon-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-right: 4px;
+  margin-left: 4px;
+}
+
+.todo-item-expiry-icon {
+  font-size: 14px;
+  cursor: help;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.todo-item-expiry-icon:hover {
+  opacity: 1;
+}
+
+.todo-item-expiry-icon.is-expired {
+  color: #ef4444;
+  opacity: 0.8;
+}
+
+.todo-item-expiry-icon.is-expired:hover {
+  opacity: 1;
+}
+
+/* Custom tooltip - shows immediately on hover */
+.expiry-tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.9);
+  color: white;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s, visibility 0.15s;
+  z-index: 1000;
+}
+
+.todo-item-expiry-icon-wrapper:hover .expiry-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+.todo-item-repeat {
+  font-size: 12px;
+  padding: 2px 8px;
+  background: rgba(79, 70, 229, 0.08);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .todo-item-checkbox {
   position: relative;
   cursor: pointer;
   flex-shrink: 0;
+  z-index: 100;
 }
 
 .todo-item-checkbox input[type="checkbox"] {
   position: absolute;
   opacity: 0;
-  width: 0;
-  height: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
 }
 
 .checkbox-icon {
@@ -379,6 +703,8 @@ const handleCheckboxClick = (e: Event) => {
   font-size: 20px;
   line-height: 1;
   transition: all 0.2s;
+  position: relative;
+  z-index: 101;
 }
 
 .icon-unchecked {
@@ -434,14 +760,8 @@ const handleCheckboxClick = (e: Event) => {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.todo-item-repeat {
-  font-size: 12px;
-  padding: 2px 8px;
-  background: var(--bg-secondary);
-  border-radius: 4px;
-  color: var(--text-secondary);
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .todo-item-actions {
@@ -449,6 +769,8 @@ const handleCheckboxClick = (e: Event) => {
   display: flex;
   align-items: center;
   gap: 4px;
+  max-width: none;
+  flex-wrap: nowrap;
 }
 
 /* 默认隐藏所有操作按钮 */
@@ -466,9 +788,7 @@ const handleCheckboxClick = (e: Event) => {
 .todo-item-move-down,
 .todo-item-edit,
 .todo-item-delete,
-.todo-item-expand,
 .todo-item-add-sub,
-.todo-item-complete-early,
 .todo-item-disable {
   width: 20px;
   height: 20px;
@@ -486,14 +806,23 @@ const handleCheckboxClick = (e: Event) => {
   flex-shrink: 0;
 }
 
+.todo-item-move-up,
+.todo-item-move-down,
+.todo-item-edit,
+.todo-item-delete,
+.todo-item-add-sub {
+  opacity: 0;
+}
+
 .todo-item-move-up:hover,
 .todo-item-move-down:hover {
   background: var(--bg-secondary);
   color: var(--primary-color);
 }
 
-.todo-item-expand {
-  font-size: 16px;
+.todo-item-move-up,
+.todo-item-move-down {
+  font-size: 17px;
 }
 
 .todo-item-add-sub {
@@ -510,25 +839,10 @@ const handleCheckboxClick = (e: Event) => {
   color: var(--danger-color);
 }
 
-.todo-item-expand:hover {
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-}
-
 .todo-item-add-sub:hover {
   background: var(--bg-secondary);
   color: var(--primary-color);
 }
-
-.todo-item-complete-early {
-  font-size: 14px;
-}
-
-.todo-item-complete-early:hover {
-  background: var(--bg-secondary);
-  color: #22c55e;
-}
-
 /* 安卓风格开关 */
 .toggle-switch {
   position: relative;
@@ -577,6 +891,117 @@ const handleCheckboxClick = (e: Event) => {
   gap: 8px;
 }
 
+.disabled-subtodos-group {
+  margin-left: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.disabled-subtodos-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px dashed #fb923c;
+  border-radius: 8px;
+  background: rgba(251, 146, 60, 0.08);
+  color: #c2410c;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+}
+
+.disabled-subtodos-toggle:hover {
+  background: rgba(251, 146, 60, 0.14);
+}
+
+.disabled-subtodos-toggle-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.disabled-subtodos-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #fb923c;
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.disabled-subtodos-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #c2410c;
+  min-width: 0;
+}
+
+.disabled-subtodos-arrow {
+  flex-shrink: 0;
+  font-size: 14px;
+  color: #c2410c;
+}
+
+.disabled-subtodos-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+@media (max-width: 520px) {
+  .todo-item {
+    gap: 8px;
+    padding: 13px 14px;
+  }
+
+  .todo-item.is-subtodo {
+    margin-left: 20px;
+    padding: 11px 14px;
+  }
+
+  .disabled-subtodos-group {
+    margin-left: 20px;
+  }
+
+  .todo-item-content {
+    min-width: 0;
+  }
+
+  .todo-item-actions {
+    gap: 4px;
+    max-width: none;
+    flex-wrap: nowrap;
+  }
+
+  .todo-item-move-up,
+  .todo-item-move-down,
+  .todo-item-edit,
+  .todo-item-delete,
+  .todo-item-add-sub,
+  .todo-item-disable {
+    width: 18px;
+    height: 18px;
+    font-size: 14px;
+  }
+
+  .todo-item-repeat,
+  .todo-item-subtodo-count,
+  .priority-mark {
+    font-size: 11px;
+    padding: 2px 6px;
+  }
+}
+
 :root {
   --bg-primary: #ffffff;
   --bg-secondary: #f1f3f5;
@@ -598,4 +1023,5 @@ const handleCheckboxClick = (e: Event) => {
     --danger-bg: #7f1d1d;
   }
 }
+
 </style>

@@ -1,12 +1,20 @@
 mod models;
 
-use models::{TodoItem, TodoStore, Settings, SettingsStore, WindowState};
+use models::{TodoItem, TodoStore, Settings, SettingsStore, WindowState, LongTermTodo, LongTermTodoStore};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, ShortcutState};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering as AtomicOrdering};
+
+#[cfg(target_os = "windows")]
+static EDGE_DOCK_HIDDEN: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+static EDGE_DOCK_OLD_WND_PROC: AtomicIsize = AtomicIsize::new(0);
+#[cfg(target_os = "windows")]
+static EDGE_DOCK_WND_PROC_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 // Windows-specific code for forcing window to foreground
 #[cfg(target_os = "windows")]
@@ -23,8 +31,26 @@ mod windows_focus {
     use windows::Win32::System::Threading::{GetCurrentThreadId, AttachThreadInput};
     use windows::Win32::Foundation::WPARAM;
     use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
     use std::thread;
     use std::time::Duration;
+
+    /// Enable high DPI awareness for crisp icons on high-DPI displays
+    pub fn enable_dpi_awareness() {
+        unsafe {
+            // Try to set Per-Monitor V2 DPI awareness (Windows 10 1703+)
+            // This provides the best quality for high-DPI displays
+            let result = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            if result.is_err() {
+                // Fallback to system default DPI awareness
+                eprintln!("Failed to set Per-Monitor V2 DPI awareness, using system default");
+            } else {
+                eprintln!("Enabled Per-Monitor V2 DPI awareness for crisp icons");
+            }
+        }
+    }
 
     /// Force a window to the foreground on Windows - optimized for speed
     pub fn force_set_foreground(hwnd: HWND) -> Result<(), String> {
@@ -87,6 +113,139 @@ mod windows_focus {
 #[cfg(target_os = "windows")]
 use windows_focus::force_set_foreground;
 
+#[cfg(target_os = "windows")]
+fn get_auto_launch_registry_value() -> Result<Option<String>, String> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .map_err(|e| format!("Failed to open Run registry key: {}", e))?;
+
+    match run_key.get_value::<String, _>("LightTodo") {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("Failed to read auto launch registry value: {}", err)),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_auto_launch_enabled(enabled: bool) -> Result<(), String> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (run_key, _) = hkcu
+        .create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .map_err(|e| format!("Failed to open Run registry key: {}", e))?;
+
+    if enabled {
+        let exe_path = std::env::current_exe()
+            .map_err(|e| format!("Failed to resolve current executable: {}", e))?;
+        let command = format!("\"{}\"", exe_path.to_string_lossy());
+        run_key
+            .set_value("LightTodo", &command)
+            .map_err(|e| format!("Failed to enable auto launch: {}", e))?;
+    } else {
+        match run_key.delete_value("LightTodo") {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("Failed to disable auto launch: {}", err)),
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_auto_launch_enabled(_enabled: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn sync_auto_launch_with_settings(settings: &Settings, store: &SettingsStore) -> Result<(), String> {
+    let current_registry_enabled = get_auto_launch_registry_value()?.is_some();
+    if current_registry_enabled != settings.auto_launch {
+        set_auto_launch_enabled(settings.auto_launch)?;
+    }
+
+    let mut latest = settings.clone();
+    if latest.auto_launch != current_registry_enabled && latest.auto_launch != settings.auto_launch {
+        latest.auto_launch = settings.auto_launch;
+        store.save(&latest)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sync_auto_launch_with_settings(_settings: &Settings, _store: &SettingsStore) -> Result<(), String> {
+    Ok(())
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "windows")]
+        {
+            match window.hwnd() {
+                Ok(hwnd) => {
+                    if force_set_foreground(hwnd).is_err() {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_always_on_top(false);
+                        let _ = window.set_focus();
+                    }
+                }
+                Err(_) => {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_always_on_top(false);
+                    let _ = window.set_focus();
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_always_on_top(false);
+            let _ = window.set_focus();
+        }
+    }
+}
+
+fn hide_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+fn is_effectively_done_for_date(todo: &TodoItem, date_to_check: &str) -> bool {
+    if todo.completed || todo.disabled {
+        return true;
+    }
+
+    if todo.parent_id.is_some() {
+        if let Some(expiry) = &todo.expiry_date {
+            return date_to_check > expiry.as_str();
+        }
+    }
+
+    false
+}
+
+fn toggle_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        match window.is_visible() {
+            Ok(true) => hide_main_window(app),
+            Ok(false) => show_main_window(app),
+            Err(_) => show_main_window(app),
+        }
+    }
+}
+
 /// Get the data directory for storing todos and settings
 /// In dev mode, uses project root/data to avoid triggering Tauri's file watcher
 /// In release mode, uses the exe directory (portable mode)
@@ -123,7 +282,7 @@ async fn get_todos(handle: AppHandle, target_date: Option<String>) -> Result<Vec
 
 /// Add a new todo
 #[tauri::command]
-async fn add_todo(handle: AppHandle, content: String, repeat_mode: String, weekdays: Option<String>, specific_dates: Option<String>, parent_id: Option<String>) -> Result<Vec<TodoItem>, String> {
+async fn add_todo(handle: AppHandle, content: String, repeat_mode: String, weekdays: Option<String>, active_weekdays: Option<String>, specific_dates: Option<String>, parent_id: Option<String>, completed: Option<bool>, disabled: Option<bool>, expiry_date: Option<String>, priority: Option<u8>, cycle_start_date: Option<String>, cycle_active_days: Option<u32>, cycle_interval_weeks: Option<u32>) -> Result<Vec<TodoItem>, String> {
     let data_dir = get_data_dir(&handle);
     let store = TodoStore::new(data_dir);
 
@@ -133,7 +292,46 @@ async fn add_todo(handle: AppHandle, content: String, repeat_mode: String, weekd
     if let Some(dates) = specific_dates {
         new_todo.specific_dates = Some(dates);
     }
-    eprintln!("=== [BACKEND] Adding todo: id={}, content='{}', parent_id={:?}, specific_dates={:?}", new_todo.id, new_todo.content, new_todo.parent_id, new_todo.specific_dates);
+    if let Some(days) = active_weekdays {
+        new_todo.active_weekdays = Some(days);
+    }
+    // Set completed status if provided
+    if let Some(completed_val) = completed {
+        new_todo.completed = completed_val;
+        if completed_val {
+            new_todo.completed_at = Some(chrono::Local::now().timestamp());
+        }
+    }
+    // Set disabled status if provided
+    if let Some(disabled_val) = disabled {
+        new_todo.disabled = disabled_val;
+    }
+    // Set expiry_date if provided
+    if let Some(expiry) = expiry_date {
+        new_todo.expiry_date = Some(expiry);
+    }
+    if parent_id.is_some() {
+        new_todo.cycle_start_date = cycle_start_date;
+        new_todo.cycle_active_days = cycle_active_days;
+        new_todo.cycle_interval_weeks = cycle_interval_weeks;
+    }
+    // Set priority if provided
+    if let Some(p) = priority {
+        new_todo.priority = Some(p);
+    }
+    // Set week_start for weekly_this_week mode
+    if new_todo.repeat_mode == "weekly_this_week" {
+        let week_start = TodoStore::current_week_monday();
+        eprintln!("=== [BACKEND] Set week_start={} for weekly_this_week todo", week_start);
+        new_todo.week_start = Some(week_start);
+    }
+    // Set month_start for monthly_this_month mode
+    if new_todo.repeat_mode == "monthly_this_month" {
+        let month_start = TodoStore::current_month_first();
+        eprintln!("=== [BACKEND] Set month_start={} for monthly_this_month todo", month_start);
+        new_todo.month_start = Some(month_start);
+    }
+    eprintln!("=== [BACKEND] Adding todo: id={}, content='{}', parent_id={:?}, specific_dates={:?}, completed={:?}", new_todo.id, new_todo.content, new_todo.parent_id, new_todo.specific_dates, new_todo.completed);
     eprintln!("=== [BACKEND] Current todos count before add: {}", todos.len());
     todos.push(new_todo.clone());
     eprintln!("=== [BACKEND] Todos count after push: {}", todos.len());
@@ -149,13 +347,15 @@ async fn add_todo(handle: AppHandle, content: String, repeat_mode: String, weekd
 
 /// Toggle todo completion status
 #[tauri::command]
-async fn toggle_todo(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, String> {
+async fn toggle_todo(handle: AppHandle, id: String, target_date: Option<String>) -> Result<Vec<TodoItem>, String> {
     use chrono::Local;
 
     let data_dir = get_data_dir(&handle);
     let store = TodoStore::new(data_dir);
 
     let mut todos = store.load()?;
+    let today = TodoStore::today();
+    let date_to_check = target_date.as_deref().unwrap_or(&today);
 
     eprintln!("=== [TOGGLE_TODO] Starting toggle for todo id={}", id);
 
@@ -205,18 +405,14 @@ async fn toggle_todo(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, Str
             }
         }
     } else if is_parent && !is_completed {
-        // Parent is being uncompleted, check if any subtodo is still completed
-        // If any subtodo is completed, parent should remain completed
-        let any_subtodo_completed = todos.iter()
-            .filter(|t| t.parent_id.as_deref() == Some(id.as_str()))
-            .any(|t| t.completed);
-
-        if any_subtodo_completed {
-            // Some subtodos are still completed, mark parent back as completed
-            if let Some(parent_todo) = todos.iter_mut().find(|t| t.id == id) {
-                parent_todo.completed = true;
-                parent_todo.completed_at = Some(Local::now().timestamp());
-                eprintln!("Parent has completed subtodos, keeping parent '{}' as completed", parent_todo.content);
+        // Parent is being uncompleted, also uncomplete all subtodos
+        // (except disabled ones, which should stay completed)
+        eprintln!("Parent todo is being uncompleted, uncompleting all subtodos");
+        for todo in todos.iter_mut() {
+            if todo.parent_id.as_deref() == Some(id.as_str()) && !todo.disabled {
+                todo.completed = false;
+                todo.completed_at = None;
+                eprintln!("  Uncompleted subtodo '{}' (disabled={})", todo.content, todo.disabled);
             }
         }
     }
@@ -226,38 +422,44 @@ async fn toggle_todo(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, Str
         // Collect sibling info for debugging
         let siblings: Vec<_> = todos.iter()
             .filter(|t| t.parent_id.as_deref() == Some(&pid))
-            .map(|t| (t.id.clone(), t.content.clone(), t.completed))
+            .map(|t| (t.id.clone(), t.content.clone(), t.completed, t.disabled))
             .collect();
 
         eprintln!("=== [TOGGLE SUBTODO] Parent ID: {}", pid);
-        for (sid, scontent, scompleted) in &siblings {
-            eprintln!("  Subtodo: {} ({}) - completed={}", scontent, sid, scompleted);
+        for (sid, scontent, scompleted, sdisabled) in &siblings {
+            eprintln!("  Subtodo: {} ({}) - completed={}, disabled={}", scontent, sid, scompleted, sdisabled);
         }
 
-        let all_siblings_completed = todos.iter()
+        // Check if all subtodos are completed OR disabled
+        let all_siblings_done = todos.iter()
             .filter(|t| t.parent_id.as_deref() == Some(&pid))
-            .all(|t| t.completed);
+            .all(|t| is_effectively_done_for_date(t, date_to_check));
 
-        eprintln!("  all_siblings_completed = {}", all_siblings_completed);
+        eprintln!("  all_siblings_done = {}", all_siblings_done);
 
         if let Some(parent_todo) = todos.iter_mut().find(|t| t.id == pid) {
             eprintln!("  Parent before: '{}' completed={}", parent_todo.content, parent_todo.completed);
-            if all_siblings_completed {
-                // All subtodos completed, mark parent as completed
+
+            // IMPORTANT: Always update parent's last_reset_date when a subtodo is completed
+            // This ensures that partially completed subtodos don't get reset when switching views
+            if is_completed && (parent_todo.repeat_mode == "daily" || parent_todo.repeat_mode == "weekly") {
+                parent_todo.last_reset_date = Some(TodoStore::today());
+                eprintln!("  -> Updated parent's last_reset_date to today because a subtodo was completed");
+            }
+
+            if all_siblings_done {
+                // All subtodos completed or disabled, mark parent as completed
                 parent_todo.completed = true;
                 parent_todo.completed_at = Some(Local::now().timestamp());
-                if parent_todo.repeat_mode == "daily" || parent_todo.repeat_mode == "weekly" {
-                    parent_todo.last_reset_date = Some(TodoStore::today());
-                }
-                eprintln!("  -> All subtodos completed, marking parent as completed");
+                eprintln!("  -> All subtodos completed/disabled, marking parent as completed");
             } else {
-                // Not all subtodos are completed, mark parent as uncompleted
+                // Not all subtodos are done, mark parent as uncompleted
                 parent_todo.completed = false;
                 parent_todo.completed_at = None;
-                parent_todo.last_reset_date = None;
-                eprintln!("  -> Not all subtodos completed, marking parent as UNCOMPLETED");
+                eprintln!("  -> Not all subtodos completed/disabled, marking parent as UNCOMPLETED");
             }
-            eprintln!("  Parent after: '{}' completed={}", parent_todo.content, parent_todo.completed);
+            eprintln!("  Parent after: '{}' completed={}, last_reset_date={:?}",
+                parent_todo.content, parent_todo.completed, parent_todo.last_reset_date);
         }
     }
 
@@ -274,7 +476,10 @@ async fn toggle_todo(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, Str
     }
 
     store.save(&todos)?;
-    store.get_todos(None)
+
+    // Always return the fully processed current-view todo list so runtime fields like
+    // inactive_by_weekday stay in sync after toggling.
+    store.get_todos(Some(date_to_check))
 }
 
 /// Delete a todo (and all its subtodos if it's a parent)
@@ -342,7 +547,7 @@ fn delete_subtree_recursive(todos: &mut Vec<TodoItem>, parent_id: &str) {
 
 /// Edit a todo
 #[tauri::command]
-async fn edit_todo(handle: AppHandle, id: String, content: String, repeat_mode: String, weekdays: Option<String>, specific_dates: Option<String>) -> Result<Vec<TodoItem>, String> {
+async fn edit_todo(handle: AppHandle, id: String, content: String, repeat_mode: String, weekdays: Option<String>, active_weekdays: Option<String>, specific_dates: Option<String>, expiry_date: Option<String>, priority: Option<u8>, cycle_start_date: Option<String>, cycle_active_days: Option<u32>, cycle_interval_weeks: Option<u32>) -> Result<Vec<TodoItem>, String> {
     let data_dir = get_data_dir(&handle);
     let store = TodoStore::new(data_dir);
 
@@ -352,11 +557,20 @@ async fn edit_todo(handle: AppHandle, id: String, content: String, repeat_mode: 
         let old_repeat_mode = todo.repeat_mode.clone();
         let old_completed = todo.completed;
         let _old_last_reset = todo.last_reset_date.clone();
+        let is_subtodo = todo.parent_id.is_some();
 
         todo.content = content;
         todo.repeat_mode = repeat_mode.clone();
         todo.weekdays = if repeat_mode == "weekly" { weekdays } else { None };
+        todo.active_weekdays = if is_subtodo { active_weekdays } else { None };
         todo.specific_dates = if repeat_mode == "specific_dates" { specific_dates } else { None };
+        // Allow expiry_date for daily/weekly repeat modes OR for subtodos
+        todo.expiry_date = if repeat_mode == "daily" || repeat_mode == "weekly" || is_subtodo { expiry_date } else { None };
+        todo.cycle_start_date = if is_subtodo { cycle_start_date } else { None };
+        todo.cycle_active_days = if is_subtodo { cycle_active_days } else { None };
+        todo.cycle_interval_weeks = if is_subtodo { cycle_interval_weeks } else { None };
+        // Set priority (only for parent todos)
+        todo.priority = if is_subtodo { None } else { priority };
 
         eprintln!("Editing todo: repeat_mode {} -> {}, completed={}",
             old_repeat_mode, repeat_mode, old_completed);
@@ -478,7 +692,7 @@ async fn move_todo_up(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, St
         }
     };
 
-    // Find all siblings with same parent_id
+    // Find all siblings with same parent_id (only parent todos for moving)
     let sibling_indices: Vec<usize> = todos.iter()
         .enumerate()
         .filter(|(_, t)| t.parent_id == parent_id)
@@ -487,7 +701,8 @@ async fn move_todo_up(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, St
     eprintln!("=== [MOVE UP] Found {} siblings with parent_id={:?}", sibling_indices.len(), parent_id);
 
     // Find position among siblings
-    let pos = match sibling_indices.iter().position(|&i| i == idx) {
+    let pos = sibling_indices.iter().position(|&i| i == idx);
+    let pos = match pos {
         Some(p) => p,
         None => {
             let err = format!("Todo not in siblings list");
@@ -497,10 +712,10 @@ async fn move_todo_up(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, St
     };
     eprintln!("=== [MOVE UP] Todo is at position {} among siblings", pos);
 
-    // If not first among siblings, swap with previous
+    // If not first among siblings, swap with previous in file
     if pos > 0 {
         let prev_idx = sibling_indices[pos - 1];
-        eprintln!("=== [MOVE UP] Swapping index {} with index {}", idx, prev_idx);
+        eprintln!("=== [MOVE UP] Swapping positions in file: {} <-> {}", idx, prev_idx);
         todos.swap(idx, prev_idx);
         eprintln!("=== [MOVE UP] Swap complete, saving to file...");
         store.save(&todos)?;
@@ -546,7 +761,8 @@ async fn move_todo_down(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
     eprintln!("=== [MOVE DOWN] Found {} siblings with parent_id={:?}", sibling_indices.len(), parent_id);
 
     // Find position among siblings
-    let pos = match sibling_indices.iter().position(|&i| i == idx) {
+    let pos = sibling_indices.iter().position(|&i| i == idx);
+    let pos = match pos {
         Some(p) => p,
         None => {
             let err = format!("Todo not in siblings list");
@@ -556,10 +772,10 @@ async fn move_todo_down(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
     };
     eprintln!("=== [MOVE DOWN] Todo is at position {} among siblings (total: {})", pos, sibling_indices.len());
 
-    // If not last among siblings, swap with next
+    // If not last among siblings, swap with next in file
     if pos < sibling_indices.len() - 1 {
         let next_idx = sibling_indices[pos + 1];
-        eprintln!("=== [MOVE DOWN] Swapping index {} with index {}", idx, next_idx);
+        eprintln!("=== [MOVE DOWN] Swapping positions in file: {} <-> {}", idx, next_idx);
         todos.swap(idx, next_idx);
         eprintln!("=== [MOVE DOWN] Swap complete, saving to file...");
         store.save(&todos)?;
@@ -611,57 +827,6 @@ async fn complete_all_subtodos(handle: AppHandle, id: String) -> Result<Vec<Todo
     store.get_todos(None)
 }
 
-/// Complete a weekly todo or subtodo early (mark as completed on any day)
-/// This allows users to complete a weekly repeating todo (or its subtodos) before its scheduled day
-/// Note: For subtodos, this will also check if all siblings are completed and mark parent as completed.
-#[tauri::command]
-async fn complete_early(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, String> {
-    use chrono::Local;
-
-    let data_dir = get_data_dir(&handle);
-    let store = TodoStore::new(data_dir);
-
-    let mut todos = store.load()?;
-
-    // Find the todo and mark as completed
-    let parent_id: Option<String> = if let Some(todo) = todos.iter_mut().find(|t| t.id == id) {
-        let parent_id = todo.parent_id.clone();
-        todo.completed = true;
-        todo.completed_at = Some(Local::now().timestamp());
-        // Set last_reset_date to today so it resets on the next scheduled weekday
-        // This works for both parent todos and subtodos
-        todo.last_reset_date = Some(TodoStore::today());
-
-        let todo_type = if todo.parent_id.is_some() { "subtodo" } else { "parent todo" };
-        eprintln!("Completed {} '{}' early on {}", todo_type, todo.content, TodoStore::today());
-
-        parent_id
-    } else {
-        return Err("Todo not found".to_string());
-    };
-
-    // If this was a subtodo, check if all siblings are completed and mark parent as completed
-    if let Some(pid) = parent_id {
-        let all_siblings_completed = todos.iter()
-            .filter(|t| t.parent_id.as_deref() == Some(&pid))
-            .all(|t| t.completed);
-
-        if all_siblings_completed {
-            if let Some(parent_todo) = todos.iter_mut().find(|t| t.id == pid) {
-                parent_todo.completed = true;
-                parent_todo.completed_at = Some(Local::now().timestamp());
-                if parent_todo.repeat_mode == "daily" || parent_todo.repeat_mode == "weekly" {
-                    parent_todo.last_reset_date = Some(TodoStore::today());
-                }
-                eprintln!("All subtodos completed, marking parent '{}' as completed", parent_todo.content);
-            }
-        }
-    }
-
-    store.save(&todos)?;
-    store.get_todos(None)
-}
-
 /// Toggle disable status of a todo
 /// When disabled, the todo is marked as completed and cannot be operated on
 /// When enabled (undisabled), the todo can be operated on normally
@@ -673,14 +838,20 @@ async fn toggle_disable(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
     let store = TodoStore::new(data_dir);
 
     let mut todos = store.load()?;
+    let today = TodoStore::today();
 
     // Find the todo and toggle its disabled status
-    if let Some(todo) = todos.iter_mut().find(|t| t.id == id) {
-        todo.disabled = !todo.disabled;
+    let is_disabling = if let Some(todo) = todos.iter_mut().find(|t| t.id == id) {
+        let auto_disabled_by_expiry = todo.parent_id.is_some()
+            && !todo.disabled
+            && todo.expiry_date.as_ref().is_some_and(|expiry| today.as_str() > expiry.as_str());
+        let was_effectively_disabled = todo.disabled || auto_disabled_by_expiry;
+        let is_disabling = !was_effectively_disabled;
         let todo_type = if todo.parent_id.is_some() { "subtodo" } else { "parent todo" };
 
-        if todo.disabled {
+        if is_disabling {
             // When disabling, mark as completed
+            todo.disabled = true;
             todo.completed = true;
             todo.completed_at = Some(Local::now().timestamp());
             if todo.repeat_mode == "daily" || todo.repeat_mode == "weekly" {
@@ -689,13 +860,89 @@ async fn toggle_disable(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
             eprintln!("Disabled {} '{}', marked as completed", todo_type, todo.content);
         } else {
             // When enabling, mark as uncompleted
+            todo.disabled = false;
             todo.completed = false;
             todo.completed_at = None;
             todo.last_reset_date = None;
-            eprintln!("Enabled {} '{}', marked as uncompleted", todo_type, todo.content);
+            // Clear expiry date when manually enabling an expired subtodo
+            // This prevents it from being auto-disabled again on next startup
+            if todo.parent_id.is_some() && todo.expiry_date.is_some() {
+                todo.expiry_date = None;
+                eprintln!("Cleared expired expiry_date for {}", todo_type);
+            }
+            eprintln!(
+                "Enabled {} '{}', marked as uncompleted (auto_disabled_by_expiry={})",
+                todo_type,
+                todo.content,
+                auto_disabled_by_expiry
+            );
         }
+        is_disabling
     } else {
         return Err("Todo not found".to_string());
+    };
+
+    // If this was a parent todo, also disable/enable all its subtodos
+    if let Some(parent_id) = todos.iter().find(|t| t.id == id && t.parent_id.is_none()).map(|t| t.id.clone()) {
+        eprintln!("Parent todo was {}, propagating to all subtodos", if is_disabling { "disabled" } else { "enabled" });
+        for subtodo in todos.iter_mut().filter(|t| t.parent_id.as_deref() == Some(&parent_id)) {
+            if is_disabling {
+                // Disable subtodo and mark as completed
+                if !subtodo.disabled {
+                    subtodo.disabled = true;
+                    subtodo.completed = true;
+                    subtodo.completed_at = Some(Local::now().timestamp());
+                    if subtodo.repeat_mode == "daily" || subtodo.repeat_mode == "weekly" {
+                        subtodo.last_reset_date = Some(TodoStore::today());
+                    }
+                    eprintln!("  -> Disabled subtodo '{}', marked as completed", subtodo.content);
+                }
+            } else {
+                // Enable subtodo and mark as uncompleted
+                let auto_disabled_by_expiry = subtodo.expiry_date.as_ref().is_some_and(|expiry| today.as_str() > expiry.as_str());
+                if subtodo.disabled || auto_disabled_by_expiry {
+                    subtodo.disabled = false;
+                    subtodo.completed = false;
+                    subtodo.completed_at = None;
+                    subtodo.last_reset_date = None;
+                    if subtodo.expiry_date.is_some() {
+                        subtodo.expiry_date = None;
+                    }
+                    eprintln!("  -> Enabled subtodo '{}', marked as uncompleted", subtodo.content);
+                }
+            }
+        }
+    }
+
+    // If this was a subtodo, check if all siblings are completed or disabled
+    // If so, mark the parent as completed
+    if let Some(parent_id) = todos.iter()
+        .find(|t| t.id == id)
+        .and_then(|t| t.parent_id.clone()) {
+
+        // Check if all subtodos are completed OR disabled
+        let all_siblings_done = todos.iter()
+            .filter(|t| t.parent_id.as_deref() == Some(&parent_id))
+            .all(|t| is_effectively_done_for_date(t, &today));
+
+        if let Some(parent_todo) = todos.iter_mut().find(|t| t.id == parent_id) {
+            if all_siblings_done {
+                // All subtodos are completed or disabled, mark parent as completed
+                parent_todo.completed = true;
+                parent_todo.completed_at = Some(Local::now().timestamp());
+                if parent_todo.repeat_mode == "daily" || parent_todo.repeat_mode == "weekly" {
+                    parent_todo.last_reset_date = Some(TodoStore::today());
+                }
+                eprintln!("All subtodos completed/disabled, marking parent '{}' as completed", parent_todo.content);
+            } else {
+                // Not all subtodos are done, mark parent as uncompleted
+                // BUT DO NOT reset last_reset_date - this prevents unwanted subtodo resets
+                parent_todo.completed = false;
+                parent_todo.completed_at = None;
+                // last_reset_date should remain unchanged to avoid resetting subtodos
+                eprintln!("Not all subtodos completed/disabled, marking parent '{}' as uncompleted (keeping last_reset_date={:?})", parent_todo.content, parent_todo.last_reset_date);
+            }
+        }
     }
 
     store.save(&todos)?;
@@ -719,20 +966,28 @@ async fn update_shortcut(
     _app: AppHandle,
 ) -> Result<Settings, String> {
     let mut settings = store.load()?;
+    let shortcut = shortcut.trim().to_string();
+    let old_shortcut = match action.as_str() {
+        "showHideWindow" => settings.shortcuts.show_hide_window.clone(),
+        _ => return Err("Invalid action".to_string()),
+    };
 
     match action.as_str() {
         "showHideWindow" => {
             settings.shortcuts.show_hide_window = shortcut.clone();
             eprintln!("Updated show/hide shortcut to: {} (restart required)", shortcut);
         }
-        "toggleFloating" => {
-            settings.shortcuts.toggle_floating = shortcut.clone();
-            eprintln!("Updated toggle floating shortcut to: {} (restart required)", shortcut);
-        }
-        _ => return Err("Invalid action".to_string()),
+        _ => unreachable!(),
     }
 
     store.save(&settings)?;
+
+    if shortcut.is_empty() && !old_shortcut.trim().is_empty() {
+        if let Err(e) = _app.global_shortcut().unregister(old_shortcut.as_str()) {
+            eprintln!("Failed to unregister shortcut {}: {}", old_shortcut, e);
+        }
+    }
+
     Ok(settings)
 }
 
@@ -750,6 +1005,28 @@ fn update_memo(store: State<'_, SettingsStore>, content: String) -> Result<Setti
 fn update_memo_height(store: State<'_, SettingsStore>, height: u32) -> Result<Settings, String> {
     let mut settings = store.load()?;
     settings.memo_height = height.min(300).max(60); // Limit between 60-300px
+    store.save(&settings)?;
+    Ok(settings)
+}
+
+/// Update priority color
+#[tauri::command]
+fn update_priority_color(store: State<'_, SettingsStore>, priority: u8, color: String) -> Result<Settings, String> {
+    let mut settings = store.load()?;
+    if settings.priority_colors.is_none() {
+        settings.priority_colors = Some(std::collections::HashMap::new());
+    }
+    settings.priority_colors.as_mut().unwrap().insert(priority, color);
+    store.save(&settings)?;
+    Ok(settings)
+}
+
+/// Update auto launch
+#[tauri::command]
+fn update_auto_launch(store: State<'_, SettingsStore>, enabled: bool) -> Result<Settings, String> {
+    let mut settings = store.load()?;
+    settings.auto_launch = enabled;
+    set_auto_launch_enabled(enabled)?;
     store.save(&settings)?;
     Ok(settings)
 }
@@ -773,16 +1050,345 @@ fn save_window_state(
     Ok(())
 }
 
+// ============ Long Term Todo Commands ============
+
+/// Get all long term todos
+#[tauri::command]
+fn get_long_term_todos(store: State<'_, LongTermTodoStore>) -> Result<Vec<LongTermTodo>, String> {
+    store.load()
+}
+
+/// Add a new long term todo
+#[tauri::command]
+fn add_long_term_todo(store: State<'_, LongTermTodoStore>, content: String) -> Result<Vec<LongTermTodo>, String> {
+    store.add(content)?;
+    store.load()
+}
+
+/// Toggle long term todo completion
+#[tauri::command]
+fn toggle_long_term_todo(store: State<'_, LongTermTodoStore>, id: String) -> Result<Vec<LongTermTodo>, String> {
+    store.toggle(&id)?;
+    store.load()
+}
+
+/// Delete a long term todo
+#[tauri::command]
+fn delete_long_term_todo(store: State<'_, LongTermTodoStore>, id: String) -> Result<Vec<LongTermTodo>, String> {
+    store.delete(&id)?;
+    store.load()
+}
+
+/// Update long term todo content
+#[tauri::command]
+fn update_long_term_todo(store: State<'_, LongTermTodoStore>, id: String, content: String) -> Result<Vec<LongTermTodo>, String> {
+    store.update(&id, &content)?;
+    store.load()
+}
+
+/// Move long term todo up
+#[tauri::command]
+fn move_long_term_todo_up(store: State<'_, LongTermTodoStore>, id: String) -> Result<Vec<LongTermTodo>, String> {
+    store.move_up(&id)?;
+    store.load()
+}
+
+/// Move long term todo down
+#[tauri::command]
+fn move_long_term_todo_down(store: State<'_, LongTermTodoStore>, id: String) -> Result<Vec<LongTermTodo>, String> {
+    store.move_down(&id)?;
+    store.load()
+}
+
+#[cfg(target_os = "windows")]
+fn cursor_position() -> Option<windows::Win32::Foundation::POINT> {
+    let mut point = windows::Win32::Foundation::POINT { x: 0, y: 0 };
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point).ok()?;
+    }
+    Some(point)
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn edge_dock_wnd_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::LRESULT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, SC_MINIMIZE, SIZE_MINIMIZED, WM_SIZE, WM_SYSCOMMAND,
+        WNDPROC,
+    };
+
+    if EDGE_DOCK_HIDDEN.load(AtomicOrdering::Relaxed) {
+        let is_minimize_command =
+            msg == WM_SYSCOMMAND && ((wparam.0 as u32) & 0xfff0) == SC_MINIMIZE;
+        let is_minimized_size = msg == WM_SIZE && (wparam.0 as u32) == SIZE_MINIMIZED;
+
+        if is_minimize_command || is_minimized_size {
+            return LRESULT(0);
+        }
+    }
+
+    let old_proc = EDGE_DOCK_OLD_WND_PROC.load(AtomicOrdering::Relaxed);
+    if old_proc != 0 {
+        let old_proc: WNDPROC = std::mem::transmute(old_proc);
+        CallWindowProcW(old_proc, hwnd, msg, wparam, lparam)
+    } else {
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn install_edge_dock_wnd_proc(window: &tauri::WebviewWindow) {
+    if EDGE_DOCK_WND_PROC_INSTALLED.swap(true, AtomicOrdering::Relaxed) {
+        return;
+    }
+
+    let Ok(hwnd) = window.hwnd() else {
+        EDGE_DOCK_WND_PROC_INSTALLED.store(false, AtomicOrdering::Relaxed);
+        return;
+    };
+
+    unsafe {
+        let old_proc = windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::GWLP_WNDPROC,
+            edge_dock_wnd_proc as *const () as usize as isize,
+        );
+
+        if old_proc == 0 {
+            EDGE_DOCK_WND_PROC_INSTALLED.store(false, AtomicOrdering::Relaxed);
+        } else {
+            EDGE_DOCK_OLD_WND_PROC.store(old_proc, AtomicOrdering::Relaxed);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_edge_dock_window_style(window: &tauri::WebviewWindow, _hidden: bool) {
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        };
+
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let next = (current | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
+
+        if next != current {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next as isize);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_edge_window_topmost(window: &tauri::WebviewWindow, topmost: bool) {
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+
+        let insert_after = if topmost {
+            Some(HWND_TOPMOST)
+        } else {
+            Some(HWND_NOTOPMOST)
+        };
+
+        let _ = SetWindowPos(
+            hwnd,
+            insert_after,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn start_edge_dock_monitor(app: AppHandle) {
+    std::thread::spawn(move || {
+        const HANDLE_WIDTH: i32 = 18;
+        const EDGE_THRESHOLD: i32 = 24;
+        const HOVER_WIDTH: i32 = 7;
+        const LEAVE_PADDING: i32 = 10;
+        const EXPANDED_MARGIN: i32 = 18;
+        const TICK_MS: u64 = 120;
+
+        let mut is_hidden_to_edge = false;
+        let mut last_hidden_y: Option<i32> = None;
+        let mut startup_dock_checked = false;
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
+
+            let Some(window) = app.get_webview_window("main") else {
+                continue;
+            };
+
+            let is_minimized = window.is_minimized().unwrap_or(false);
+            if is_minimized {
+                if is_hidden_to_edge {
+                    let monitor = window
+                        .current_monitor()
+                        .ok()
+                        .flatten()
+                        .or_else(|| window.primary_monitor().ok().flatten());
+
+                    if let Some(monitor) = monitor {
+                        let monitor_top = monitor.position().y;
+                        let monitor_right = monitor.position().x + monitor.size().width as i32;
+                        let hidden_x = monitor_right - HANDLE_WIDTH;
+                        let y = last_hidden_y.unwrap_or(monitor_top + 120).max(monitor_top);
+
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        set_edge_dock_window_style(&window, true);
+                        set_edge_window_topmost(&window, true);
+                        let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, y));
+                    }
+                }
+                continue;
+            }
+
+            if !window.is_visible().unwrap_or(false) {
+                is_hidden_to_edge = false;
+                EDGE_DOCK_HIDDEN.store(false, AtomicOrdering::Relaxed);
+                set_edge_dock_window_style(&window, false);
+                last_hidden_y = None;
+                continue;
+            }
+
+            let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+                continue;
+            };
+
+            let monitor = window
+                .current_monitor()
+                .ok()
+                .flatten()
+                .or_else(|| window.primary_monitor().ok().flatten());
+            let Some(monitor) = monitor else {
+                continue;
+            };
+
+            let Some(cursor) = cursor_position() else {
+                continue;
+            };
+
+            let monitor_left = monitor.position().x;
+            let monitor_top = monitor.position().y;
+            let monitor_right = monitor_left + monitor.size().width as i32;
+            let monitor_bottom = monitor_top + monitor.size().height as i32;
+            let x = position.x;
+            let y = position.y;
+            let width = size.width as i32;
+            let height = size.height as i32;
+            let window_right = x + width;
+            let window_bottom = y + height;
+
+            let hidden_x = monitor_right - HANDLE_WIDTH;
+            let expanded_x = (monitor_right - width - EXPANDED_MARGIN).max(monitor_left);
+            let clamped_y = y.clamp(monitor_top, (monitor_bottom - height).max(monitor_top));
+
+            let cursor_in_window = cursor.x >= x
+                && cursor.x <= window_right
+                && cursor.y >= y
+                && cursor.y <= window_bottom;
+            let cursor_near_handle = cursor.x >= monitor_right - HOVER_WIDTH
+                && cursor.x <= monitor_right + HOVER_WIDTH
+                && cursor.y >= y - HOVER_WIDTH
+                && cursor.y <= window_bottom + HOVER_WIDTH;
+
+            if is_hidden_to_edge || x >= hidden_x - 1 {
+                is_hidden_to_edge = true;
+                EDGE_DOCK_HIDDEN.store(true, AtomicOrdering::Relaxed);
+                last_hidden_y = Some(clamped_y);
+                if cursor_near_handle {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    set_edge_dock_window_style(&window, false);
+                    let _ = window.set_position(tauri::PhysicalPosition::new(expanded_x, clamped_y));
+                    set_edge_window_topmost(&window, false);
+                    is_hidden_to_edge = false;
+                    EDGE_DOCK_HIDDEN.store(false, AtomicOrdering::Relaxed);
+                    last_hidden_y = None;
+                }
+                continue;
+            }
+
+            let is_right_docked = window_right >= monitor_right - EDGE_THRESHOLD
+                && x < hidden_x
+                && width > HANDLE_WIDTH * 4;
+            let cursor_left_window = cursor.x < x - LEAVE_PADDING
+                || cursor.x > monitor_right + HOVER_WIDTH
+                || cursor.y < y - LEAVE_PADDING
+                || cursor.y > window_bottom + LEAVE_PADDING;
+
+            if !startup_dock_checked {
+                startup_dock_checked = true;
+
+                if is_right_docked {
+                    EDGE_DOCK_HIDDEN.store(true, AtomicOrdering::Relaxed);
+                    set_edge_dock_window_style(&window, true);
+                    set_edge_window_topmost(&window, true);
+                    let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, clamped_y));
+                    is_hidden_to_edge = true;
+                    last_hidden_y = Some(clamped_y);
+                    continue;
+                }
+            }
+
+            if is_right_docked && !cursor_in_window && cursor_left_window {
+                EDGE_DOCK_HIDDEN.store(true, AtomicOrdering::Relaxed);
+                set_edge_dock_window_style(&window, true);
+                set_edge_window_topmost(&window, true);
+                let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, clamped_y));
+                is_hidden_to_edge = true;
+                last_hidden_y = Some(clamped_y);
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn start_edge_dock_monitor(_app: AppHandle) {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Enable high DPI awareness for crisp icons on high-DPI displays
+    #[cfg(target_os = "windows")]
+    windows_focus::enable_dpi_awareness();
+
     // Single instance check - try to acquire lock
-    let single_instance = single_instance::SingleInstance::new("MyTODO-app-instance").unwrap();
+    let single_instance = single_instance::SingleInstance::new("LightTodo-app-instance").unwrap();
     if !single_instance.is_single() {
         // Another instance is already running - show dialog and exit
         std::thread::spawn(|| {
             use std::process::Command;
             let _ = Command::new("mshta")
-                .args(&["vbscript:msgbox(\"MyTODO 已在运行！请检查系统托盘或任务栏。\",16,\"MyTODO\")(window.close)"])
+                .args(&["vbscript:msgbox(\"LightTodo is already running. Please check the system tray or taskbar.\",16,\"LightTodo\")(window.close)"])
                 .output();
         });
         eprintln!("Another instance is already running. Exiting...");
@@ -793,7 +1399,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .setup(|app| {
-            eprintln!("=== MyTODO Starting ===");
+            eprintln!("=== LightTodo Starting ===");
 
             // Use exe directory for storing settings and todos (portable mode)
             // In dev mode, use project root/data to avoid triggering rebuilds
@@ -845,13 +1451,22 @@ pub fn run() {
                 let _ = settings_store.save(&settings);
             }
 
+            sync_auto_launch_with_settings(&settings, &settings_store)?;
+
             app.manage(settings_store.clone());
+
+            // Create and manage long term todo store
+            let long_term_todo_store = LongTermTodoStore::new(data_dir.clone());
+            app.manage(long_term_todo_store);
 
             eprintln!("Settings loaded: shortcuts={:?}", settings.shortcuts);
 
             // Initialize global shortcuts plugin with Builder pattern
             let show_hide_shortcut_str = settings.shortcuts.show_hide_window.clone();
-            let toggle_floating_shortcut_str = settings.shortcuts.toggle_floating.clone();
+            let mut shortcut_registrations = Vec::new();
+            if !show_hide_shortcut_str.trim().is_empty() {
+                shortcut_registrations.push(show_hide_shortcut_str.as_str());
+            }
             let app_handle = app.handle().clone();
 
             // Use a shared state to track window visibility more reliably
@@ -860,16 +1475,11 @@ pub fn run() {
             let window_visible_for_handler = window_visible.clone();
 
             let plugin = tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcuts([
-                    show_hide_shortcut_str.as_str(),
-                    toggle_floating_shortcut_str.as_str(),
-                ])?
+                .with_shortcuts(shortcut_registrations)?
                 .with_handler(move |_app, shortcut, event| {
                     if event.state == ShortcutState::Pressed {
                         let show_hide_matches = shortcut.matches(Modifiers::CONTROL | Modifiers::SHIFT | Modifiers::ALT, Code::Digit0);
                         let show_hide_matches_mac = shortcut.matches(Modifiers::SUPER | Modifiers::SHIFT | Modifiers::ALT, Code::Digit0);
-                        let toggle_floating_matches = shortcut.matches(Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyF);
-                        let toggle_floating_matches_mac = shortcut.matches(Modifiers::SUPER | Modifiers::SHIFT, Code::KeyF);
 
                         if show_hide_matches || show_hide_matches_mac {
                             if let Some(window) = app_handle.get_webview_window("main") {
@@ -907,10 +1517,13 @@ pub fn run() {
                                         match window.hwnd() {
                                             Ok(hwnd) => {
                                                 match force_set_foreground(hwnd) {
-                                                    Ok(_) => {}
+                                                    Ok(_) => {
+                                                        let _ = window.set_always_on_top(false);
+                                                    }
                                                     Err(_) => {
                                                         let _ = window.unminimize();
                                                         let _ = window.show();
+                                                        let _ = window.set_always_on_top(false);
                                                         let _ = window.set_focus();
                                                     }
                                                 }
@@ -918,6 +1531,7 @@ pub fn run() {
                                             Err(_) => {
                                                 let _ = window.unminimize();
                                                 let _ = window.show();
+                                                let _ = window.set_always_on_top(false);
                                                 let _ = window.set_focus();
                                             }
                                         }
@@ -926,21 +1540,11 @@ pub fn run() {
                                     {
                                         let _ = window.unminimize();
                                         let _ = window.show();
+                                        let _ = window.set_always_on_top(false);
                                         let _ = window.set_focus();
                                         let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
                                     }
                                 }
-                            }
-                        } else if toggle_floating_matches || toggle_floating_matches_mac {
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                tauri::async_runtime::block_on(async move {
-                                    match window.is_always_on_top() {
-                                        Ok(is_on_top) => {
-                                            let _ = window.set_always_on_top(!is_on_top);
-                                        }
-                                        Err(_) => {}
-                                    }
-                                });
                             }
                         }
                     }
@@ -949,8 +1553,8 @@ pub fn run() {
 
             match app.handle().plugin(plugin) {
                 Ok(_) => {
-                    eprintln!("Registered global shortcuts: {} (show/hide), {} (toggle floating)",
-                        show_hide_shortcut_str, toggle_floating_shortcut_str);
+                    eprintln!("Registered global shortcut: {} (show/hide)",
+                        show_hide_shortcut_str);
                 }
                 Err(e) => {
                     eprintln!("Failed to register global shortcut plugin: {}", e);
@@ -966,9 +1570,14 @@ pub fn run() {
             // Ensure the main window is shown on startup
             if let Some(window) = app.get_webview_window("main") {
                 eprintln!("Showing main window...");
+                install_edge_dock_wnd_proc(&window);
+                let _ = window.set_always_on_top(false);
+                set_edge_dock_window_style(&window, false);
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+
+            start_edge_dock_monitor(app.handle().clone());
 
             // Handle window close event - hide instead of close
             if let Some(window) = app.get_webview_window("main") {
@@ -1031,7 +1640,6 @@ pub fn run() {
             edit_todo,
             toggle_expand,
             complete_all_subtodos,
-            complete_early,
             toggle_disable,
             reorder_todos,
             move_todo_up,
@@ -1041,6 +1649,15 @@ pub fn run() {
             save_window_state,
             update_memo,
             update_memo_height,
+            update_priority_color,
+            update_auto_launch,
+            get_long_term_todos,
+            add_long_term_todo,
+            toggle_long_term_todo,
+            delete_long_term_todo,
+            move_long_term_todo_up,
+            move_long_term_todo_down,
+            update_long_term_todo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1049,9 +1666,9 @@ pub fn run() {
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::image::Image;
 
-    // Create tray menu items - only quit item
-    let quit_item = MenuItem::with_id(app, "quit", "退出程序", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&quit_item])?;
+    let show_item = MenuItem::with_id(app, "show", "显示软件", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
     // Try to load icon.ico first (Windows preferred), then fallback to PNG
     let icon_result = app.path().resource_dir()?
@@ -1073,10 +1690,23 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let _tray = TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
-        .show_menu_on_left_click(true)
-        .tooltip("MyTODO - 待办事项管理")
+        .show_menu_on_left_click(false)
+        .tooltip("LightTodo - 轻量待办管理")
+        .on_tray_icon_event(move |tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_main_window(&tray.app_handle());
+            }
+        })
         .on_menu_event(move |app, event| {
             match event.id.0.as_str() {
+                "show" => {
+                    toggle_main_window(app);
+                }
                 "quit" => {
                     app.exit(0);
                 }
@@ -1090,24 +1720,82 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 // Create a simple colored icon as fallback
 fn create_simple_icon() -> Image<'static> {
-    // Create a simple 32x32 RGBA icon with orange color
+    // Create a simple 32x32 RGBA icon with green checkmark (✅)
     let mut pixels = vec![0u8; 32 * 32 * 4];
     for y in 0..32 {
         for x in 0..32 {
             let idx = (y * 32 + x) * 4;
-            // Orange color with transparency gradient
             let center_x = 16.0;
             let center_y = 16.0;
             let dx = x as f32 - center_x;
             let dy = y as f32 - center_y;
             let dist = (dx * dx + dy * dy).sqrt();
-            let alpha = if dist < 14.0 { 255.0 } else { (15.0 - dist).max(0.0) * 17.0 };
 
-            pixels[idx] = 79;   // R
-            pixels[idx + 1] = 70;  // G
-            pixels[idx + 2] = 229; // B (purple/indigo)
-            pixels[idx + 3] = alpha as u8; // A
+            // Draw green circle background
+            if dist < 14.0 {
+                // Green color
+                pixels[idx] = 34;     // R
+                pixels[idx + 1] = 197; // G
+                pixels[idx + 2] = 94;  // B
+                pixels[idx + 3] = 255; // A
+            } else {
+                pixels[idx + 3] = 0; // Transparent
+            }
+
+            // Draw white checkmark
+            // Checkmark points: (8,16) -> (14,22) -> (24,10)
+            let p1 = (8.0, 16.0);
+            let p2 = (14.0, 22.0);
+            let p3 = (24.0, 10.0);
+
+            // First segment: p1 to p2
+            let on_segment1 = point_to_line_distance(x as f32, y as f32, p1.0, p1.1, p2.0, p2.1) < 2.0
+                && x as f32 >= p1.0.min(p2.0) - 1.0
+                && x as f32 <= p1.0.max(p2.0) + 1.0
+                && y as f32 >= p1.1.min(p2.1) - 1.0
+                && y as f32 <= p1.1.max(p2.1) + 1.0;
+
+            // Second segment: p2 to p3
+            let on_segment2 = point_to_line_distance(x as f32, y as f32, p2.0, p2.1, p3.0, p3.1) < 2.0
+                && x as f32 >= p2.0.min(p3.0) - 1.0
+                && x as f32 <= p2.0.max(p3.0) + 1.0
+                && y as f32 >= p2.1.min(p3.1) - 1.0
+                && y as f32 <= p2.1.max(p3.1) + 1.0;
+
+            if on_segment1 || on_segment2 {
+                pixels[idx] = 255;     // R
+                pixels[idx + 1] = 255; // G
+                pixels[idx + 2] = 255; // B
+                pixels[idx + 3] = 255; // A
+            }
         }
     }
     Image::new_owned(pixels, 32, 32)
+}
+
+// Helper function to calculate distance from point to line segment
+fn point_to_line_distance(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    let a = px - x1;
+    let b = py - y1;
+    let c = x2 - x1;
+    let d = y2 - y1;
+
+    let dot = a * c + b * d;
+    let len_sq = c * c + d * d;
+    let mut param = -1.0;
+    if len_sq != 0.0 {
+        param = dot / len_sq;
+    }
+
+    let (xx, yy) = if param < 0.0 {
+        (x1, y1)
+    } else if param > 1.0 {
+        (x2, y2)
+    } else {
+        (x1 + param * c, y1 + param * d)
+    };
+
+    let dx = px - xx;
+    let dy = py - yy;
+    (dx * dx + dy * dy).sqrt()
 }

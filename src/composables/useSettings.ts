@@ -29,5 +29,26 @@ export function useSettings() {
     }
   };
 
-  return { settings, loading, error, loadSettings, updateShortcut };
+  const updatePriorityColor = async (priority: 1 | 2 | 3, color: string) => {
+    try {
+      settings.value = await invoke<Settings>('update_priority_color', {
+        priority,
+        color,
+      });
+    } catch (e) {
+      throw new Error(String(e));
+    }
+  };
+
+  const updateAutoLaunch = async (enabled: boolean) => {
+    try {
+      settings.value = await invoke<Settings>('update_auto_launch', {
+        enabled,
+      });
+    } catch (e) {
+      throw new Error(String(e));
+    }
+  };
+
+  return { settings, loading, error, loadSettings, updateShortcut, updatePriorityColor, updateAutoLaunch };
 }

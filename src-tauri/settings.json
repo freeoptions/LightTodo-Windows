@@ -10,5 +10,6 @@
     "height": 700
   },
   "memo": "",
-  "memo_height": 80
+  "memo_height": 80,
+  "autoLaunch": true
 }

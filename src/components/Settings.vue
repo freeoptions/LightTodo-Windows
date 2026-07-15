@@ -7,9 +7,10 @@ const emit = defineEmits<{
   (e: 'shortcuts-changed', shortcuts: { showHideWindow: string }): void;
 }>();
 
-const { settings, loading, error, loadSettings, updateShortcut } = useSettings();
+const { settings, loading, error, loadSettings, updateShortcut, updatePriorityColor, updateAutoLaunch } = useSettings();
 
 const savingShortcut = ref<string | null>(null);
+const savingAutoLaunch = ref(false);
 
 onMounted(() => {
   loadSettings();
@@ -32,7 +33,32 @@ const handleShortcutChange = async (action: string, value: string) => {
   }
 };
 
+const handlePriorityColorChange = async (priority: 1 | 2 | 3, color: string) => {
+  try {
+    await updatePriorityColor(priority, color);
+  } catch (e) {
+    // Revert on error
+    await loadSettings();
+    alert('颜色保存失败: ' + (e as Error).message);
+  }
+};
+
+const handleAutoLaunchChange = async (event: Event) => {
+  const enabled = (event.target as HTMLInputElement).checked;
+  savingAutoLaunch.value = true;
+  try {
+    await updateAutoLaunch(enabled);
+  } catch (e) {
+    await loadSettings();
+    alert('开机自启设置保存失败: ' + (e as Error).message);
+  } finally {
+    savingAutoLaunch.value = false;
+  }
+};
+
 const formatShortcut = (shortcut: string): string => {
+  if (!shortcut.trim()) return '未设置';
+
   return shortcut
     .split('+')
     .map(part => {
@@ -75,6 +101,34 @@ const formatShortcut = (shortcut: string): string => {
 
     <div v-else-if="settings" class="settings-content">
       <div class="settings-section">
+        <h3 class="section-title">启动设置</h3>
+        <p class="section-description">
+          控制 LightTodo 是否在 Windows 登录后自动启动，默认开启。
+        </p>
+
+        <div class="setting-item setting-item-inline">
+          <div class="toggle-content">
+            <label class="setting-label" for="auto-launch">开机自启</label>
+            <p class="setting-hint">开启后会在系统登录时自动启动 LightTodo。</p>
+          </div>
+
+          <div class="toggle-control">
+            <label class="switch">
+              <input
+                id="auto-launch"
+                type="checkbox"
+                :checked="settings.autoLaunch"
+                :disabled="savingAutoLaunch"
+                @change="handleAutoLaunchChange"
+              />
+              <span class="switch-slider"></span>
+            </label>
+            <span v-if="savingAutoLaunch" class="saving-hint">保存中...</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
         <h3 class="section-title">全局快捷键</h3>
         <p class="section-description">
           这些快捷键在应用外也能使用，可以快速控制窗口
@@ -107,6 +161,43 @@ const formatShortcut = (shortcut: string): string => {
           <li><kbd>Win</kbd> - Windows键</li>
           <li>使用 <code>+</code> 组合按键，例如: <code>ctrl+shift+alt+1</code></li>
         </ul>
+      </div>
+
+      <div class="settings-section">
+        <h3 class="section-title">优先级颜色</h3>
+        <p class="section-description">
+          设置不同优先级的待办显示颜色
+        </p>
+
+        <div class="priority-colors">
+          <div class="priority-color-item">
+            <label class="priority-label">优先级 1</label>
+            <input
+              type="color"
+              :value="settings?.priorityColors?.['1'] || '#ef4444'"
+              @input="(e) => handlePriorityColorChange(1, (e.target as HTMLInputElement).value)"
+              class="color-picker"
+            />
+          </div>
+          <div class="priority-color-item">
+            <label class="priority-label">优先级 2</label>
+            <input
+              type="color"
+              :value="settings?.priorityColors?.['2'] || '#f59e0b'"
+              @input="(e) => handlePriorityColorChange(2, (e.target as HTMLInputElement).value)"
+              class="color-picker"
+            />
+          </div>
+          <div class="priority-color-item">
+            <label class="priority-label">优先级 3</label>
+            <input
+              type="color"
+              :value="settings?.priorityColors?.['3'] || '#22c55e'"
+              @input="(e) => handlePriorityColorChange(3, (e.target as HTMLInputElement).value)"
+              class="color-picker"
+            />
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -170,6 +261,13 @@ const formatShortcut = (shortcut: string): string => {
   border-radius: 8px;
 }
 
+.setting-item-inline {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
 .setting-label {
   font-size: 14px;
   font-weight: 500;
@@ -186,6 +284,67 @@ const formatShortcut = (shortcut: string): string => {
   font-size: 12px;
   color: var(--text-secondary, #6c757d);
   margin: 0;
+}
+
+.toggle-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.toggle-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.switch {
+  position: relative;
+  display: inline-flex;
+  width: 48px;
+  height: 28px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch-slider {
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+  background: #cbd5e1;
+  border-radius: 999px;
+  transition: background 0.2s ease;
+}
+
+.switch-slider::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2);
+  transition: transform 0.2s ease;
+}
+
+.switch input:checked + .switch-slider {
+  background: #22c55e;
+}
+
+.switch input:checked + .switch-slider::before {
+  transform: translateX(20px);
+}
+
+.switch input:disabled + .switch-slider {
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
 kbd {
@@ -230,6 +389,56 @@ code {
   gap: 8px;
 }
 
+.priority-colors {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.priority-color-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-secondary, #f8f9fa);
+  border-radius: 8px;
+  min-width: 100px;
+}
+
+.priority-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary, #1a1a1a);
+}
+
+.color-picker {
+  width: 60px;
+  height: 40px;
+  border: 1px solid var(--border-color, #dee2e6);
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+}
+
+.color-picker::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.color-picker::-webkit-color-swatch {
+  border: none;
+  border-radius: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .priority-color-item {
+    background: #2a2a2a;
+  }
+
+  .color-picker {
+    border-color: #495057;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   .setting-item {
     background: #2a2a2a;
@@ -238,6 +447,17 @@ code {
   kbd, code {
     background: #1e1e1e;
     border-color: #495057;
+  }
+
+  .switch-slider {
+    background: #475569;
+  }
+}
+
+@media (max-width: 640px) {
+  .setting-item-inline {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>

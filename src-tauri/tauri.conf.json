@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MyTODO",
+  "productName": "LightTodo",
   "version": "0.1.0",
-  "identifier": "com.freez.mytodo",
+  "identifier": "com.freez.lighttodo",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,12 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "MyTODO",
+        "title": "LightTodo",
         "resizable": true,
         "minWidth": 400,
         "minHeight": 500,
         "alwaysOnTop": false,
-        "skipTaskbar": false,
+        "skipTaskbar": true,
         "decorations": true,
         "center": true
       }

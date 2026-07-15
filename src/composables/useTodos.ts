@@ -11,7 +11,8 @@ function buildTodoTree(flatTodos: TodoItem[]): TodoItem[] {
   // Create a map for quick lookup
   const todoMap = new Map<string, TodoItem>();
   flatTodos.forEach(todo => {
-    todoMap.set(todo.id, { ...todo, subtodos: [] });
+    // Preserve the expanded state from backend, default to true if not set
+    todoMap.set(todo.id, { ...todo, subtodos: [], expanded: todo.expanded ?? true });
   });
 
   // Build the tree structure
@@ -79,7 +80,8 @@ export function useTodos() {
     repeatMode: TodoItem['repeatMode'],
     weekdays?: string,
     specificDates?: string,
-    parentId?: string
+    parentId?: string,
+    expiryDate?: string
   ) => {
     // Don't show loading state to avoid page jump (like toggleTodo)
     error.value = null;
@@ -90,6 +92,7 @@ export function useTodos() {
         weekdays,
         specificDates,
         parentId,
+        expiryDate,
       });
       // Reload with current view date instead of using returned list
       const flatTodos = await invoke<TodoItem[]>('get_todos', {
@@ -109,13 +112,16 @@ export function useTodos() {
   const toggleTodo = async (id: string) => {
     // Don't show loading state for toggle to avoid page jump
     error.value = null;
+
     try {
-      await invoke<TodoItem[]>('toggle_todo', { id });
-      // Reload with current view date instead of using returned list
-      const flatTodos = await invoke<TodoItem[]>('get_todos', {
+      // Pass the current view date to filter the returned todos
+      const flatTodos = await invoke<TodoItem[]>('toggle_todo', {
+        id,
         targetDate: currentViewDate.value || null
       });
+
       todos.value = buildTodoTree(flatTodos);
+      // Note: Removed auto-scroll to keep page position stable
     } catch (e) {
       error.value = e as string;
       console.error('Failed to toggle todo:', e);
@@ -142,33 +148,24 @@ export function useTodos() {
   };
 
   /**
-   * Toggle expanded state of a parent todo (local only, no backend call)
+   * Toggle expanded state of a parent todo
    */
   const toggleExpand = async (id: string) => {
-    // Find the todo in the tree and toggle its expanded state
-    const findAndToggle = (todoList: TodoItem[]): boolean => {
-      for (const todo of todoList) {
-        if (todo.id === id) {
-          todo.expanded = !todo.expanded;
-          return true;
-        }
-        if (todo.subtodos && findAndToggle(todo.subtodos)) {
-          return true;
-        }
-      }
-      return false;
-    };
-    findAndToggle(todos.value);
-    // Trigger reactivity
-    todos.value = [...todos.value];
+    // Call backend to save the expanded state
+    const flatTodos = await invoke<TodoItem[]>('toggle_expand', { id });
+    // Rebuild tree from flat todos
+    todos.value = buildTodoTree(flatTodos);
   };
 
   /**
    * Complete all subtodos of a parent todo (with user confirmation)
+   * Don't show loading state to avoid page jump (like toggleTodo)
+   * Note: Scroll position is handled by the caller (App.vue)
    */
   const completeAllSubtodos = async (id: string) => {
-    loading.value = true;
+    // Don't show loading state to avoid page jump
     error.value = null;
+
     try {
       await invoke<TodoItem[]>('complete_all_subtodos', { id });
       // Reload with current view date instead of using returned list
@@ -179,27 +176,6 @@ export function useTodos() {
     } catch (e) {
       error.value = e as string;
       console.error('Failed to complete all subtodos:', e);
-    } finally {
-      loading.value = false;
-    }
-  };
-
-  /**
-   * Complete a weekly todo early (mark as completed without affecting reset logic)
-   */
-  const completeEarly = async (id: string) => {
-    // Don't show loading state to avoid page jump
-    error.value = null;
-    try {
-      await invoke<TodoItem[]>('complete_early', { id });
-      // Reload with current view date instead of using returned list
-      const flatTodos = await invoke<TodoItem[]>('get_todos', {
-        targetDate: currentViewDate.value || null
-      });
-      todos.value = buildTodoTree(flatTodos);
-    } catch (e) {
-      error.value = e as string;
-      console.error('Failed to complete early:', e);
     }
   };
 
@@ -294,7 +270,6 @@ export function useTodos() {
     deleteTodo,
     toggleExpand,
     completeAllSubtodos,
-    completeEarly,
     toggleDisable,
     incompleteTodos,
     completedTodos,

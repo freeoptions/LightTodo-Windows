@@ -12,10 +12,19 @@ const emit = defineEmits<{
 
 // Parse the current shortcut
 const parseShortcut = (shortcut: string) => {
+  if (!shortcut.trim()) {
+    return {
+      ctrl: false,
+      alt: false,
+      shift: false,
+      key: ''
+    };
+  }
+
   const parts = shortcut.toLowerCase().split('+');
   const key = parts.find(p =>
     !['ctrl', 'alt', 'shift', 'super', 'commandorcontrol'].includes(p)
-  ) || '1';
+  ) || '';
   // Convert single digit to digit format for Tauri (e.g., "1" -> "digit1")
   const normalizedKey = /^\d$/.test(key) ? `digit${key}` : key;
   return {
@@ -29,7 +38,7 @@ const parseShortcut = (shortcut: string) => {
 const ctrl = ref(false);
 const alt = ref(false);
 const shift = ref(false);
-const selectedKey = ref('1');
+const selectedKey = ref('');
 
 // Initialize from current value
 watch(() => props.modelValue, (newValue) => {
@@ -42,6 +51,8 @@ watch(() => props.modelValue, (newValue) => {
 
 // Build shortcut string
 const shortcutString = computed(() => {
+  if (!selectedKey.value) return '';
+
   const parts: string[] = [];
   if (ctrl.value) parts.push('CommandOrControl');
   if (shift.value) parts.push('Shift');
@@ -49,6 +60,13 @@ const shortcutString = computed(() => {
   if (selectedKey.value) parts.push(selectedKey.value);
   return parts.join('+');
 });
+
+const clearShortcut = () => {
+  ctrl.value = false;
+  alt.value = false;
+  shift.value = false;
+  selectedKey.value = '';
+};
 
 // Emit changes when any modifier or key changes
 watch([ctrl, alt, shift, selectedKey], () => {
@@ -86,6 +104,7 @@ watch([ctrl, alt, shift, selectedKey], () => {
     </div>
 
     <select v-model="selectedKey" class="key-select">
+      <option value="" disabled>未设置</option>
       <optgroup label="数字">
         <option v-for="i in 10" :key="i - 1" :value="`digit${i - 1}`">
           {{ i - 1 }}
@@ -118,6 +137,15 @@ watch([ctrl, alt, shift, selectedKey], () => {
         <option value="right">→</option>
       </optgroup>
     </select>
+
+    <button
+      type="button"
+      class="clear-btn"
+      :disabled="!modelValue"
+      @click="clearShortcut"
+    >
+      取消快捷键
+    </button>
   </div>
 </template>
 
@@ -172,9 +200,32 @@ watch([ctrl, alt, shift, selectedKey], () => {
   border-color: var(--primary-color, #4f46e5);
 }
 
+.clear-btn {
+  padding: 8px 12px;
+  border: 1px solid var(--border-color, #dee2e6);
+  border-radius: 6px;
+  background: var(--bg-primary, #ffffff);
+  color: var(--text-secondary, #6c757d);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.clear-btn:hover:not(:disabled) {
+  border-color: var(--danger-color, #ef4444);
+  color: var(--danger-color, #ef4444);
+  background: var(--danger-bg, #fee2e2);
+}
+
+.clear-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 @media (prefers-color-scheme: dark) {
   .mod-btn,
-  .key-select {
+  .key-select,
+  .clear-btn {
     background: #2a2a2a;
     border-color: #495057;
   }

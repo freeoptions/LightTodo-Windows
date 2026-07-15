@@ -1916,6 +1916,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lighttodo"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "single-instance",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-opener",
+ "tauri-plugin-window-state",
+ "uuid",
+ "windows",
+ "winreg",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2049,23 +2067,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "mytodo"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "single-instance",
- "tauri",
- "tauri-build",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-opener",
- "tauri-plugin-window-state",
- "uuid",
- "windows",
 ]
 
 [[package]]
