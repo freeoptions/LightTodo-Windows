@@ -3,11 +3,11 @@ import { onMounted, onUnmounted, ref, computed, nextTick } from 'vue';
 import TodoList from './components/TodoList.vue';
 import Settings from './components/Settings.vue';
 import DatePicker from './components/DatePicker.vue';
+import LongTermTodos from './components/LongTermTodos.vue';
 import { useTodos } from './composables/useTodos';
 import { type RepeatMode, type TodoItem as TodoItemType } from './types/todo';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { saveWindowState as saveWindowStatePlugin } from '@tauri-apps/plugin-window-state';
 import type { Settings as SettingsType } from './types/settings';
 // @ts-ignore - CommonJS module
 import { Solar } from 'lunar-javascript';
@@ -31,21 +31,21 @@ const {
 const showModal = ref(false);
 const editingTodoId = ref<string | null>(null);
 const newTodoContent = ref('');
-const newTodoRepeatMode = ref<RepeatMode>('daily'); // 榛樿姣忓ぉ閲嶅
-const newTodoWeekdays = ref<number[]>([]); // 閫変腑鐨勫懆鍑?(1-7, 鍛ㄤ竴=1, 鍛ㄦ棩=7)
-const newTodoSpecificDates = ref<string[]>([]); // 閫変腑鐨勬寚瀹氭棩鏈?
+const newTodoRepeatMode = ref<RepeatMode>('daily'); // 默认每天重复
+const newTodoWeekdays = ref<number[]>([]); // 选中的周几 (1-7, 周一=1, 周日=7)
+const newTodoSpecificDates = ref<string[]>([]); // 选中的指定日期
 const newSubtodoCycleEnabled = ref(false);
 const newSubtodoCycleStartDate = ref('');
 const newSubtodoCycleActiveDays = ref(7);
 const newSubtodoCycleIntervalWeeks = ref(4);
 const weekdayOptions = [
-  { value: 1, label: '鍛ㄤ竴' },
-  { value: 2, label: '鍛ㄤ簩' },
-  { value: 3, label: '鍛ㄤ笁' },
-  { value: 4, label: '鍛ㄥ洓' },
-  { value: 5, label: '鍛ㄤ簲' },
-  { value: 6, label: '鍛ㄥ叚' },
-  { value: 7, label: '鍛ㄦ棩' },
+  { value: 1, label: '周一' },
+  { value: 2, label: '周二' },
+  { value: 3, label: '周三' },
+  { value: 4, label: '周四' },
+  { value: 5, label: '周五' },
+  { value: 6, label: '周六' },
+  { value: 7, label: '周日' },
 ];
 
 // Delete confirmation state
@@ -75,15 +75,22 @@ const parentCompleteContent = ref('');
 
 // Settings state
 const showSettings = ref(false);
+const showLongTermTodos = ref(false);
 const memo = ref('');
 const memoHeight = ref(80);
 const isSavingMemo = ref(false);
+const backgroundWallpaper = ref<string | null>(null);
 
 // View date state (for viewing todos on different days)
 const viewDate = ref('');
 const showDatePicker = ref(false);
 
 const currentWindow = getCurrentWindow();
+
+const applyBackgroundWallpaper = (wallpaper: string | null) => {
+  backgroundWallpaper.value = wallpaper;
+  document.documentElement.style.setProperty('--app-wallpaper-image', wallpaper ? `url("${wallpaper}")` : 'none');
+};
 
 // Format current date
 const currentDate = computed(() => {
@@ -142,6 +149,53 @@ const isViewingToday = computed(() => {
   return viewDate.value === '' || viewDate.value === currentDate.value.isoDate;
 });
 
+const activeParentTabId = ref<string | null>(null);
+
+const parentTabs = computed(() => {
+  return todos.value
+    .filter((todo) => !todo.parentId)
+    .map((todo, index) => ({
+      id: todo.id,
+      title: todo.content.trim() || '未命名待办',
+      completed: todo.completed,
+      index,
+    }))
+    .sort((a, b) => {
+      if (a.completed !== b.completed) return a.completed ? 1 : -1;
+      return a.index - b.index;
+    });
+});
+
+const handleParentTabsWheel = (event: WheelEvent) => {
+  const target = event.currentTarget as HTMLElement | null;
+  if (!target || target.scrollWidth <= target.clientWidth) return;
+
+  event.preventDefault();
+  target.scrollLeft += event.deltaY || event.deltaX;
+};
+
+const scrollToParentTodo = async (id: string) => {
+  activeParentTabId.value = id;
+  await nextTick();
+
+  const target = document.getElementById(`todo-${id}`);
+  if (!target) return;
+
+  const tabs = document.querySelector<HTMLElement>('.parent-tabs');
+  const tabsHeight = tabs?.getBoundingClientRect().height || 0;
+  const targetTop = target.getBoundingClientRect().top + window.scrollY;
+  const topPadding = tabsHeight + 14;
+
+  window.scrollTo({
+    top: Math.max(0, targetTop - topPadding),
+    behavior: 'smooth',
+  });
+  target.classList.add('tab-scroll-flash');
+  window.setTimeout(() => {
+    target.classList.remove('tab-scroll-flash');
+  }, 1200);
+};
+
 // Minimum date for date picker (today)
 const minDate = computed(() => {
   return new Date().toISOString().split('T')[0];
@@ -161,7 +215,7 @@ const weekDates = computed(() => {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     const isoDate = `${year}-${month}-${day}`;
-    const weekdays = ['鍛ㄦ棩', '鍛ㄤ竴', '鍛ㄤ簩', '鍛ㄤ笁', '鍛ㄥ洓', '鍛ㄤ簲', '鍛ㄥ叚'];
+    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
     const weekday = weekdays[date.getDay()];
 
     // Check if this date is in the past (before today)
@@ -197,11 +251,29 @@ const handleShortcutsChanged = async (shortcuts: { showHideWindow: string; toggl
 
 // Debounced save window state function
 let saveStateTimer: ReturnType<typeof setTimeout> | null = null;
+const saveCurrentWindowState = async () => {
+  try {
+    const [position, size, scaleFactor] = await Promise.all([
+      currentWindow.outerPosition(),
+      currentWindow.outerSize(),
+      currentWindow.scaleFactor(),
+    ]);
+
+    await invoke('save_window_state', {
+      x: Math.round(position.x / scaleFactor),
+      y: Math.round(position.y / scaleFactor),
+      width: Math.round(size.width / scaleFactor),
+      height: Math.round(size.height / scaleFactor),
+    });
+  } catch (e) {
+    console.error('Failed to save window state:', e);
+  }
+};
+
 const debouncedSaveWindowState = () => {
   if (saveStateTimer) clearTimeout(saveStateTimer);
   saveStateTimer = setTimeout(() => {
-    console.log('Saving window state via plugin...');
-    saveWindowStatePlugin();
+    saveCurrentWindowState();
   }, 300); // 300ms debounce
 };
 
@@ -216,6 +288,7 @@ onMounted(async () => {
     console.log('Frontend received settings:', settings);
     memo.value = settings.memo || '';
     memoHeight.value = settings.memoHeight || 80;
+    applyBackgroundWallpaper(settings.backgroundWallpaper || null);
   } catch (e) {
     console.error('Failed to load settings:', e);
   }
@@ -297,13 +370,13 @@ const openEditModal = async (id: string) => {
     editingSubtodo.value = isSubtodo;
     console.log('=== [EDIT] parentId:', todo.parentId, 'Is subtodo:', isSubtodo);
 
-    // 鍏堥殣钘忔ā鎬佹锛岀‘淇?key 浠?'new' 寮€濮?
+    // 先隐藏模态框，确保 key 从 'new' 开始
     showModal.value = false;
 
     // 绛夊緟 DOM 鏇存柊瀹屾垚
     await nextTick();
 
-    // 鐒跺悗璁剧疆鎵€鏈夊€硷紙姝ゆ椂妯℃€佹宸查殣钘忥紝涓嶄細瑙﹀彂閲嶆柊鎸傝浇锛?
+    // 然后设置所有值，此时模态框已隐藏，不会触发重新挂载
     editingTodoId.value = id;
     newTodoContent.value = todo.content;
     newTodoRepeatMode.value = todo.repeatMode as RepeatMode;
@@ -353,7 +426,7 @@ const openEditModal = async (id: string) => {
     // 鍐嶆绛夊緟 DOM 鏇存柊
     await nextTick();
 
-    // 鏈€鍚庢樉绀烘ā鎬佹锛堟鏃?key 鍜屽€奸兘宸叉纭缃級
+    // 最后显示模态框，此时 key 和值都已正确设置
     showModal.value = true;
 
     console.log('=== [EDIT] Modal should now be visible, addingSubtodoForParentId=', addingSubtodoForParentId.value);
@@ -787,7 +860,7 @@ const goToToday = async () => {
   <template v-if="true">
     <main class="app">
       <header class="app-header">
-        <div class="header-content drag-region" data-tauri-drag-region>
+        <div class="header-content">
           <div class="date-info">
             <div class="date-main">
               <span class="date-text">{{ viewDateDisplay.date }}</span>
@@ -797,19 +870,38 @@ const goToToday = async () => {
               <span class="lunar-zodiac">{{ viewDateDisplay.lunarZodiac }}</span>
               <span class="lunar-date">{{ viewDateDisplay.lunarMonthText }}</span>
             </div>
-            <button v-if="viewDate" @click="goToToday" class="back-today-btn" title="鍥炲埌浠婂ぉ">
-              鍥炲埌浠婂ぉ
+            <button v-if="viewDate" @click="goToToday" class="back-today-btn" title="回到今天">
+              回到今天
             </button>
           </div>
         </div>
         <div class="header-actions">
-          <button @click="openAddModal" class="add-todo-btn" title="鏂板寰呭姙">
-            <span class="add-icon">+</span>
-            <span class="add-text">鏂板寰呭姙</span>
+          <button @click="openAddModal" class="header-action-btn add-todo-btn" title="新增待办">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            <span class="add-text">新增</span>
+          </button>
+          <button @click="showSettings = true" class="header-action-btn settings-btn" title="设置" aria-label="设置">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 .6 1 1.7 1.7 0 0 0 1.1.4H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51.6Z" />
+            </svg>
+            <span>设置</span>
+          </button>
+          <button @click="showLongTermTodos = true" class="header-action-btn long-term-btn" title="长期待办">
+            <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 19.5V5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 1 4 18.5" />
+              <path d="M8 7h8M8 11h6M8 15h7" />
+            </svg>
+            <span>长期</span>
           </button>
           <div class="date-picker-wrapper">
-            <button @click="showDatePicker = !showDatePicker" class="date-picker-btn" title="鏌ョ湅鍏朵粬鏃ユ湡">
-              馃搮
+            <button @click="showDatePicker = !showDatePicker" class="header-action-btn date-picker-btn" title="查看其他日期" aria-label="查看其他日期">
+              <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 2v4M16 2v4M3.5 9.5h17M5.5 4.5h13A2 2 0 0 1 20.5 6.5v12A2 2 0 0 1 18.5 20.5h-13A2 2 0 0 1 3.5 18.5v-12A2 2 0 0 1 5.5 4.5Z" />
+              </svg>
+              <span>日期</span>
             </button>
             <div v-if="showDatePicker" class="date-picker-dropdown">
               <div class="week-dates">
@@ -828,15 +920,34 @@ const goToToday = async () => {
               </div>
             </div>
           </div>
-          <button @click="showSettings = true" class="settings-btn" title="璁剧疆">
-            <span class="settings-icon">鈿欙笍</span>
-          </button>
         </div>
       </header>
 
+      <nav
+        v-if="parentTabs.length > 0"
+        class="parent-tabs"
+        aria-label="父待办快速导航"
+        @wheel="handleParentTabsWheel"
+      >
+        <button
+          v-for="tab in parentTabs"
+          :key="tab.id"
+          type="button"
+          class="parent-tab"
+          :class="{ completed: tab.completed, active: activeParentTabId === tab.id }"
+          :title="tab.title"
+          @click="scrollToParentTodo(tab.id)"
+        >
+          <span class="parent-tab-status" aria-hidden="true"></span>
+          <span class="parent-tab-title">{{ tab.title }}</span>
+        </button>
+      </nav>
+
       <div class="app-content">
         <div v-if="error" class="error-message">
-          <span class="error-icon">鈿狅笍</span>
+          <svg class="error-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 8v5M12 17h.01M10.3 3.9 2.9 17.1A2 2 0 0 0 4.6 20h14.8a2 2 0 0 0 1.7-2.9L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+          </svg>
           <span>{{ error }}</span>
         </div>
 
@@ -850,7 +961,7 @@ const goToToday = async () => {
             placeholder="在这里记录你的备忘...（支持多行，自动保存）"
             :style="{ height: memoHeight + 'px' }"
           ></textarea>
-          <div v-if="isSavingMemo" class="memo-saving">淇濆瓨涓?..</div>
+          <div v-if="isSavingMemo" class="memo-saving">保存中...</div>
         </div>
 
         <TodoList
@@ -882,8 +993,10 @@ const goToToday = async () => {
     </div>
 
     <!-- Scroll to Top Button -->
-    <button @click="scrollToTop" class="scroll-to-top-btn" title="鍥炲埌椤堕儴">
-      鈫?
+    <button @click="scrollToTop" class="scroll-to-top-btn" title="回到顶部" aria-label="回到顶部">
+      <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 19V5M5 12l7-7 7 7" />
+      </svg>
     </button>
 
     <!-- Add Todo Modal -->
@@ -957,15 +1070,15 @@ const goToToday = async () => {
               </label>
               <label class="repeat-option">
                 <input type="radio" v-model="newTodoRepeatMode" value="daily" />
-                <span>姣忔棩</span>
+                <span>每日</span>
               </label>
               <label class="repeat-option">
                 <input type="radio" v-model="newTodoRepeatMode" value="weekly" />
-                <span>姣忓懆</span>
+                <span>每周</span>
               </label>
               <label class="repeat-option">
                 <input type="radio" v-model="newTodoRepeatMode" value="specific_dates" />
-                <span>鎸囧畾鏃ユ湡</span>
+                <span>指定日期</span>
               </label>
             </div>
 
@@ -991,12 +1104,27 @@ const goToToday = async () => {
             </div>
           </div>
 
-          <div v-if="addingSubtodoForParentId || editingSubtodo" class="form-group">
-            <label class="form-label">周期启用</label>
-            <label class="cycle-toggle-row">
-              <input type="checkbox" v-model="newSubtodoCycleEnabled" />
-              <span>按固定周期间隔自动启用/禁用</span>
-            </label>
+          <div v-if="addingSubtodoForParentId || editingSubtodo" class="form-group cycle-form-group">
+            <label class="form-label">启用方式</label>
+            <div class="cycle-mode-options">
+              <button
+                type="button"
+                class="cycle-mode-option"
+                :class="{ active: !newSubtodoCycleEnabled }"
+                @click="newSubtodoCycleEnabled = false"
+              >
+                普通启用
+              </button>
+              <button
+                type="button"
+                class="cycle-mode-option"
+                :class="{ active: newSubtodoCycleEnabled }"
+                @click="newSubtodoCycleEnabled = true"
+              >
+                周期启用
+              </button>
+            </div>
+            <span v-if="!newSubtodoCycleEnabled" class="form-hint">普通启用不会按固定周期自动禁用或恢复。</span>
             <div v-if="newSubtodoCycleEnabled" class="cycle-config-panel">
               <label class="cycle-config-field">
                 <span>首轮启用日期</span>
@@ -1038,7 +1166,7 @@ const goToToday = async () => {
     <div v-if="showDeleteConfirm" class="modal-overlay" @click.self="closeDeleteConfirm">
       <div class="modal-content modal-small">
         <div class="modal-header">
-          <h2 class="modal-title">纭鍒犻櫎</h2>
+          <h2 class="modal-title">确认删除</h2>
           <button @click="closeDeleteConfirm" class="modal-close">×</button>
         </div>
         <div class="modal-body">
@@ -1054,8 +1182,8 @@ const goToToday = async () => {
           </p>
         </div>
         <div class="modal-footer">
-          <button @click="closeDeleteConfirm" class="btn-cancel">鍙栨秷</button>
-          <button @click="confirmDelete" class="btn-confirm btn-danger">纭鍒犻櫎</button>
+          <button @click="closeDeleteConfirm" class="btn-cancel">取消</button>
+          <button @click="confirmDelete" class="btn-confirm btn-danger">确认删除</button>
         </div>
       </div>
     </div>
@@ -1077,8 +1205,8 @@ const goToToday = async () => {
           </p>
         </div>
         <div class="modal-footer">
-          <button @click="closeParentCompleteConfirm" class="btn-cancel">鍙栨秷</button>
-          <button @click="confirmParentComplete" class="btn-confirm">纭瀹屾垚</button>
+          <button @click="closeParentCompleteConfirm" class="btn-cancel">取消</button>
+          <button @click="confirmParentComplete" class="btn-confirm">确认完成</button>
         </div>
       </div>
     </div>
@@ -1087,27 +1215,36 @@ const goToToday = async () => {
     <div v-if="showSettings" class="modal-overlay" @click.self="showSettings = false">
       <div class="modal-content modal-large">
         <div class="modal-header">
-          <h2 class="modal-title">璁剧疆</h2>
+          <h2 class="modal-title">设置</h2>
           <button @click="showSettings = false" class="modal-close">×</button>
         </div>
         <div class="modal-body modal-body-scroll">
-          <Settings @shortcuts-changed="handleShortcutsChanged" />
+          <Settings
+            @shortcuts-changed="handleShortcutsChanged"
+            @wallpaper-changed="applyBackgroundWallpaper"
+          />
         </div>
       </div>
     </div>
+
+    <LongTermTodos v-if="showLongTermTodos" @close="showLongTermTodos = false" />
   </template>
 </template>
 
 <style>
 :root {
   --bg-primary: #ffffff;
-  --bg-secondary: #f8f9fa;
-  --bg-app: #f5f7fa;
-  --text-primary: #1a1a1a;
-  --text-secondary: #6c757d;
-  --border-color: #dee2e6;
-  --primary-color: #4f46e5;
-  --shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --bg-secondary: #f4f6f8;
+  --bg-app: #eef2f3;
+  --text-primary: #17212b;
+  --text-secondary: #65717f;
+  --border-color: #d8e0e7;
+  --primary-color: #2563eb;
+  --primary-hover: #1d4ed8;
+  --accent-color: #f59e0b;
+  --success-color: #16a34a;
+  --shadow: 0 10px 30px rgba(23, 33, 43, 0.08);
+  --app-wallpaper-image: none;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -1130,29 +1267,62 @@ const goToToday = async () => {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
-    Ubuntu, Cantarell, sans-serif;
+  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  color: var(--text-primary);
+  overflow-y: auto;
+  background: var(--bg-app);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+}
+
+body:hover::-webkit-scrollbar-thumb {
+  background: rgba(101, 113, 127, 0.35);
 }
 
 #app {
   min-height: 100vh;
-  background: var(--bg-app);
+  position: relative;
+  isolation: isolate;
+  background: linear-gradient(rgba(238, 242, 243, 0.72), rgba(238, 242, 243, 0.72));
+}
+
+#app::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--app-wallpaper-image);
+  background-size: cover;
+  background-position: center;
+  opacity: 0.55;
 }
 
 .app {
-  max-width: 600px;
+  max-width: 640px;
   margin: 0 auto;
-  padding: 32px 24px;
+  padding: 26px 18px;
 }
 
 .app-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: 24px;
-  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 10px;
 }
 
 .header-content {
@@ -1160,32 +1330,20 @@ body {
   min-width: 0;
 }
 
-.drag-region {
-  cursor: move;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-.drag-region:active {
-  cursor: grabbing;
-}
-
-/* Ensure all children of drag region don't block drag */
-.drag-region > * {
-  pointer-events: none;
-}
-
 .date-info {
   display: flex;
   flex-direction: column;
   gap: 4px;
   align-items: flex-start;
+  min-height: 80px;
+  justify-content: center;
 }
 
 .date-main {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
 }
 
 .lunar-info {
@@ -1195,13 +1353,13 @@ body {
 }
 
 .lunar-zodiac {
-  font-size: 16px;
+  font-size: 14px;
   color: var(--primary-color);
-  font-weight: 500;
+  font-weight: 700;
 }
 
 .lunar-date {
-  font-size: 16px;
+  font-size: 14px;
   color: var(--text-secondary);
 }
 
@@ -1216,7 +1374,6 @@ body {
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
-  pointer-events: auto; /* Override parent's pointer-events: none */
 }
 
 .back-today-btn:hover {
@@ -1229,42 +1386,133 @@ body {
 }
 
 .date-text {
-  font-size: 28px;
-  font-weight: 700;
+  font-size: 24px;
+  font-weight: 800;
   color: var(--text-primary);
-  letter-spacing: 1px;
+  letter-spacing: 0;
+  line-height: 1.1;
+  white-space: nowrap;
 }
 
 .weekday-text {
-  font-size: 18px;
+  font-size: 14px;
   color: var(--text-secondary);
-  font-weight: 500;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .header-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(72px, 1fr));
+  gap: 8px;
+  width: 164px;
+  flex: 0 0 164px;
+}
+
+.parent-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 80;
   display: flex;
   align-items: center;
   gap: 8px;
+  margin: 0 -4px 16px;
+  padding: 10px 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  background: linear-gradient(180deg, rgba(238, 242, 243, 0.98), rgba(238, 242, 243, 0.88));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 
-.add-todo-btn {
+.parent-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.parent-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 180px;
+  height: 33px;
+  padding: 0 11px;
+  border: 1px solid rgba(216, 224, 231, 0.95);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #25313d;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+  box-shadow: 0 8px 18px rgba(23, 33, 43, 0.06);
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.parent-tab:hover,
+.parent-tab.active {
+  transform: translateY(-1px);
+  border-color: rgba(37, 99, 235, 0.35);
+  box-shadow: 0 10px 22px rgba(37, 99, 235, 0.12);
+}
+
+.parent-tab.completed {
+  border-color: rgba(22, 163, 74, 0.34);
+  background: linear-gradient(180deg, rgba(34, 197, 94, 0.92), rgba(22, 163, 74, 0.9));
+  color: #ffffff;
+  box-shadow: 0 10px 22px rgba(22, 163, 74, 0.18);
+}
+
+.parent-tab-status {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.14);
+  flex: 0 0 auto;
+}
+
+.parent-tab.completed .parent-tab-status {
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.22);
+}
+
+.parent-tab-title {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: 0;
+  transform: translateY(-0.5px);
+}
+
+.header-action-btn {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  padding: 10px 16px;
+  width: 100%;
+  height: 36px;
+  padding: 0 7px;
   border: none;
   border-radius: 8px;
-  background: var(--primary-color);
-  color: white;
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 700;
   cursor: pointer;
   transition: all 0.2s;
   white-space: nowrap;
 }
 
+.add-todo-btn {
+  background: var(--primary-color);
+  color: white;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+}
+
 .add-todo-btn:hover {
-  opacity: 0.9;
+  background: var(--primary-hover);
   transform: translateY(-1px);
 }
 
@@ -1272,33 +1520,40 @@ body {
   transform: translateY(0);
 }
 
-.add-icon {
-  font-size: 18px;
-  line-height: 1;
-}
-
 .add-text {
-  font-size: 14px;
+  font-size: 13px;
 }
 
-.settings-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
+.btn-icon {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex-shrink: 0;
+}
+
+.settings-btn,
+.date-picker-btn,
+.long-term-btn {
   border: 1px solid var(--border-color);
-  border-radius: 8px;
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-size: 16px;
-  cursor: pointer;
-  transition: all 0.2s;
+  box-shadow: 0 6px 18px rgba(23, 33, 43, 0.05);
 }
 
-.settings-btn:hover {
+.settings-btn:hover,
+.date-picker-btn:hover,
+.long-term-btn:hover {
   background: var(--bg-secondary);
   border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+.long-term-btn {
+  font-size: 12px;
 }
 
 /* Date Picker Styles */
@@ -1306,24 +1561,8 @@ body {
   position: relative;
 }
 
-.date-picker-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 16px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.date-picker-btn:hover {
-  background: var(--bg-secondary);
-  border-color: var(--primary-color);
+.date-picker-wrapper .header-action-btn {
+  height: 36px;
 }
 
 .date-picker-dropdown {
@@ -1334,7 +1573,7 @@ body {
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow);
   padding: 12px;
   min-width: 280px;
 }
@@ -1395,7 +1634,7 @@ body {
 
 .memo-textarea {
   width: 100%;
-  padding: 12px;
+  padding: 14px 16px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--bg-primary);
@@ -1406,12 +1645,14 @@ body {
   min-height: 80px;
   max-height: 200px;
   line-height: 1.5;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-shadow: 0 8px 20px rgba(23, 33, 43, 0.04);
 }
 
 .memo-textarea:focus {
   outline: none;
   border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
 .memo-textarea::placeholder {
@@ -1435,7 +1676,16 @@ body {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding-bottom: 70px;
+  padding-bottom: 128px;
+}
+
+.todo-item-wrapper.tab-scroll-flash > .todo-item {
+  border-color: rgba(37, 99, 235, 0.55);
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12), 0 12px 26px rgba(37, 99, 235, 0.12);
+}
+
+.todo-item-wrapper[id^="todo-"] {
+  scroll-margin-top: 68px;
 }
 
 .error-message {
@@ -1457,7 +1707,14 @@ body {
 }
 
 .error-icon {
-  font-size: 16px;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex-shrink: 0;
 }
 
 /* Modal Styles */
@@ -1479,7 +1736,7 @@ body {
   background: var(--bg-primary);
   border-radius: 12px;
   width: 100%;
-  max-width: 400px;
+  max-width: 430px;
   max-height: 80vh;
   display: flex;
   flex-direction: column;
@@ -1758,27 +2015,44 @@ body {
   border-radius: 8px;
 }
 
-.cycle-toggle-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  color: var(--text-primary);
-  cursor: pointer;
-  user-select: none;
+.cycle-form-group {
+  gap: 10px;
 }
 
-.cycle-toggle-row input {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--primary-color);
+.cycle-mode-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cycle-mode-option {
+  height: 36px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, color 0.2s, box-shadow 0.2s;
+}
+
+.cycle-mode-option:hover {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+.cycle-mode-option.active {
+  border-color: var(--primary-color);
+  background: var(--primary-color);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.16);
 }
 
 .cycle-config-panel {
   display: grid;
-  grid-template-columns: minmax(150px, 1.4fr) minmax(92px, 0.8fr) minmax(92px, 0.8fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
-  margin-top: 12px;
   padding: 12px;
   background: var(--bg-secondary);
   border: 1px solid rgba(79, 70, 229, 0.16);
@@ -1795,9 +2069,14 @@ body {
   color: var(--text-secondary);
 }
 
+.cycle-config-field:first-child {
+  grid-column: 1 / -1;
+}
+
 .cycle-config-panel .form-hint {
   grid-column: 1 / -1;
   margin-top: 0;
+  line-height: 1.45;
 }
 
 /* Subtodos in Modal Styles */
@@ -1908,8 +2187,8 @@ body {
   right: 0;
   background: var(--bg-primary);
   border-top: 1px solid var(--border-color);
-  padding: 12px 24px;
-  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+  padding: 12px max(24px, calc((100vw - 640px) / 2 + 24px));
+  box-shadow: 0 -10px 24px rgba(23, 33, 43, 0.06);
   z-index: 100;
 }
 
@@ -1942,7 +2221,7 @@ body {
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--primary-color), #818cf8);
+  background: linear-gradient(90deg, var(--primary-color), var(--success-color));
   border-radius: 4px;
   transition: width 0.3s ease;
 }
@@ -1950,18 +2229,16 @@ body {
 /* Scroll to Top Button */
 .scroll-to-top-btn {
   position: fixed;
-  bottom: 80px;
-  right: 24px;
-  width: 44px;
-  height: 44px;
-  border: none;
-  border-radius: 50%;
-  background: var(--primary-color);
-  color: white;
-  font-size: 20px;
-  font-weight: bold;
+  bottom: 88px;
+  right: max(18px, calc((100vw - 640px) / 2 + 18px));
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--primary-color);
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 8px 22px rgba(23, 33, 43, 0.14);
   transition: all 0.3s ease;
   z-index: 90;
   display: flex;
@@ -1971,8 +2248,9 @@ body {
 
 .scroll-to-top-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
-  opacity: 0.9;
+  background: var(--primary-color);
+  color: white;
+  box-shadow: 0 10px 26px rgba(37, 99, 235, 0.22);
 }
 
 .scroll-to-top-btn:active {

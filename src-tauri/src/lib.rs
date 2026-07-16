@@ -1031,6 +1031,15 @@ fn update_auto_launch(store: State<'_, SettingsStore>, enabled: bool) -> Result<
     Ok(settings)
 }
 
+/// Update background wallpaper stored in settings as a data URL.
+#[tauri::command]
+fn update_background_wallpaper(store: State<'_, SettingsStore>, wallpaper: Option<String>) -> Result<Settings, String> {
+    let mut settings = store.load()?;
+    settings.background_wallpaper = wallpaper.filter(|value| !value.trim().is_empty());
+    store.save(&settings)?;
+    Ok(settings)
+}
+
 /// Save window state
 #[tauri::command]
 fn save_window_state(
@@ -1227,6 +1236,50 @@ fn set_edge_window_topmost(window: &tauri::WebviewWindow, topmost: bool) {
 }
 
 #[cfg(target_os = "windows")]
+fn dock_window_to_right_edge(window: &tauri::WebviewWindow, settings: &Settings) {
+    const HANDLE_WIDTH: i32 = 18;
+
+    let monitor = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.current_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        let _ = window.show();
+        return;
+    };
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let width = settings.window.width.clamp(400, 1000) as f64;
+    let height = settings.window.height.clamp(500, 1200) as f64;
+    let _ = window.unmaximize();
+    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+
+    let size = window.outer_size().ok();
+    let physical_height = size
+        .map(|value| value.height as i32)
+        .unwrap_or_else(|| (height * scale).round() as i32);
+
+    let monitor_top = monitor.position().y;
+    let monitor_right = monitor.position().x + monitor.size().width as i32;
+    let monitor_bottom = monitor_top + monitor.size().height as i32;
+    let hidden_x = monitor_right - HANDLE_WIDTH;
+    let requested_y = (settings.window.y as f64 * scale).round() as i32;
+    let hidden_y = requested_y.clamp(monitor_top, (monitor_bottom - physical_height).max(monitor_top));
+
+    EDGE_DOCK_HIDDEN.store(true, AtomicOrdering::Relaxed);
+    set_edge_dock_window_style(window, true);
+    set_edge_window_topmost(window, true);
+    let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, hidden_y));
+    let _ = window.show();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn dock_window_to_right_edge(window: &tauri::WebviewWindow, _settings: &Settings) {
+    let _ = window.show();
+}
+
+#[cfg(target_os = "windows")]
 fn start_edge_dock_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         const HANDLE_WIDTH: i32 = 18;
@@ -1381,19 +1434,24 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     windows_focus::enable_dpi_awareness();
 
-    // Single instance check - try to acquire lock
-    let single_instance = single_instance::SingleInstance::new("LightTodo-app-instance").unwrap();
-    if !single_instance.is_single() {
-        // Another instance is already running - show dialog and exit
-        std::thread::spawn(|| {
-            use std::process::Command;
-            let _ = Command::new("mshta")
-                .args(&["vbscript:msgbox(\"LightTodo is already running. Please check the system tray or taskbar.\",16,\"LightTodo\")(window.close)"])
-                .output();
-        });
-        eprintln!("Another instance is already running. Exiting...");
-        return;
-    }
+    let _single_instance = if cfg!(debug_assertions) {
+        None
+    } else {
+        // Single instance check - try to acquire lock
+        let single_instance = single_instance::SingleInstance::new("LightTodo-app-instance").unwrap();
+        if !single_instance.is_single() {
+            // Another instance is already running - show dialog and exit
+            std::thread::spawn(|| {
+                use std::process::Command;
+                let _ = Command::new("mshta")
+                    .args(&["vbscript:msgbox(\"LightTodo is already running. Please check the system tray or taskbar.\",16,\"LightTodo\")(window.close)"])
+                    .output();
+            });
+            eprintln!("Another instance is already running. Exiting...");
+            return;
+        }
+        Some(single_instance)
+    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1567,14 +1625,11 @@ pub fn run() {
                 eprintln!("Application will continue without tray icon");
             }
 
-            // Ensure the main window is shown on startup
+            // Put the main window directly on the right edge before showing it.
             if let Some(window) = app.get_webview_window("main") {
-                eprintln!("Showing main window...");
+                eprintln!("Docking main window to right edge...");
                 install_edge_dock_wnd_proc(&window);
-                let _ = window.set_always_on_top(false);
-                set_edge_dock_window_style(&window, false);
-                let _ = window.show();
-                let _ = window.set_focus();
+                dock_window_to_right_edge(&window, &settings);
             }
 
             start_edge_dock_monitor(app.handle().clone());
@@ -1651,6 +1706,7 @@ pub fn run() {
             update_memo_height,
             update_priority_color,
             update_auto_launch,
+            update_background_wallpaper,
             get_long_term_todos,
             add_long_term_todo,
             toggle_long_term_todo,
@@ -1705,7 +1761,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(move |app, event| {
             match event.id.0.as_str() {
                 "show" => {
-                    toggle_main_window(app);
+                    show_main_window(app);
                 }
                 "quit" => {
                     app.exit(0);

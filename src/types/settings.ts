@@ -20,6 +20,7 @@ export interface Settings {
     2?: string;
     3?: string;
   };
+  backgroundWallpaper?: string | null;
 }
 
 export type ShortcutAction = 'showHideWindow';

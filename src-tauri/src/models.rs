@@ -126,6 +126,8 @@ pub struct Settings {
     pub auto_launch: bool,
     #[serde(rename = "priorityColors", alias = "priority_colors", default)]
     pub priority_colors: Option<HashMap<u8, String>>,
+    #[serde(rename = "backgroundWallpaper", alias = "background_wallpaper", default)]
+    pub background_wallpaper: Option<String>,
 }
 
 fn default_memo_height() -> u32 {
@@ -145,6 +147,7 @@ impl Default for Settings {
             memo_height: 200,
             auto_launch: true,
             priority_colors: None,
+            background_wallpaper: None,
         }
     }
 }
@@ -166,6 +169,77 @@ impl SettingsStore {
         Self { file_path }
     }
 
+    fn apply_json_settings(settings: &mut Settings, value: &serde_json::Value) {
+        if let Some(shortcuts) = value.get("shortcuts") {
+            if let Some(show_hide) = shortcuts
+                .get("showHideWindow")
+                .or_else(|| shortcuts.get("show_hide_window"))
+                .and_then(|v| v.as_str())
+            {
+                settings.shortcuts.show_hide_window = show_hide.to_string();
+            }
+        }
+
+        if let Some(window) = value.get("window").or_else(|| value.get("window_state")) {
+            if let Some(x) = window.get("x").and_then(|v| v.as_i64()) {
+                settings.window.x = x as i32;
+            }
+            if let Some(y) = window.get("y").and_then(|v| v.as_i64()) {
+                settings.window.y = y as i32;
+            }
+            if let Some(width) = window.get("width").and_then(|v| v.as_u64()) {
+                settings.window.width = width as u32;
+            }
+            if let Some(height) = window.get("height").and_then(|v| v.as_u64()) {
+                settings.window.height = height as u32;
+            }
+        }
+
+        if let Some(memo) = value.get("memo").and_then(|v| v.as_str()) {
+            settings.memo = memo.to_string();
+        }
+
+        if let Some(height) = value
+            .get("memoHeight")
+            .or_else(|| value.get("memo_height"))
+            .and_then(|v| v.as_u64())
+        {
+            settings.memo_height = (height as u32).clamp(60, 300);
+        }
+
+        if let Some(auto_launch) = value
+            .get("autoLaunch")
+            .or_else(|| value.get("auto_launch"))
+            .and_then(|v| v.as_bool())
+        {
+            settings.auto_launch = auto_launch;
+        }
+
+        if let Some(priority_colors) = value
+            .get("priorityColors")
+            .or_else(|| value.get("priority_colors"))
+            .cloned()
+        {
+            if let Ok(colors) = serde_json::from_value::<Option<HashMap<u8, String>>>(priority_colors) {
+                settings.priority_colors = colors;
+            }
+        }
+
+        if let Some(background_wallpaper) = value
+            .get("backgroundWallpaper")
+            .or_else(|| value.get("background_wallpaper"))
+        {
+            settings.background_wallpaper = background_wallpaper.as_str().map(|v| v.to_string());
+        }
+    }
+
+    fn salvage_settings_from_json(&self, content: &str) -> Option<Settings> {
+        let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
+        let mut settings = Settings::default();
+        Self::apply_json_settings(&mut settings, &value);
+        Some(settings)
+    }
+
     /// Load settings from the JSON file
     pub fn load(&self) -> Result<Settings, String> {
         if !self.file_path.exists() {
@@ -183,7 +257,7 @@ impl SettingsStore {
             return Ok(default);
         }
 
-        // Try to parse, if fails, backup old file and use defaults
+        // Try to parse, if fails, backup old file and salvage readable fields.
         match serde_json::from_str::<Settings>(&content) {
             Ok(settings) => {
                 if content.contains("\"toggleFloating\"") || content.contains("\"toggle_floating\"") {
@@ -192,12 +266,18 @@ impl SettingsStore {
                 Ok(settings)
             }
             Err(e) => {
-                eprintln!("Failed to parse settings: {}, using defaults", e);
+                eprintln!("Failed to parse settings: {}, attempting to salvage readable fields", e);
                 // Backup old settings file
                 let backup_path = self.file_path.with_extension("json.backup");
                 let _ = fs::copy(&self.file_path, &backup_path);
                 eprintln!("Old settings backed up to: {:?}", backup_path);
-                // Use defaults and save
+
+                if let Some(settings) = self.salvage_settings_from_json(&content) {
+                    self.save(&settings)?;
+                    return Ok(settings);
+                }
+
+                // Use defaults only when even the JSON shape cannot be read.
                 let default = Settings::default();
                 self.save(&default)?;
                 Ok(default)
@@ -222,7 +302,7 @@ pub struct TodoItem {
     #[serde(rename = "repeatMode", alias = "repeat_mode")]
     pub repeat_mode: String, // "daily", "weekly", "none", "specific_dates"
     #[serde(rename = "weekdays", alias = "week_days")]
-    pub weekdays: Option<String>, // For weekly mode: "1,3,5" (鍛ㄤ竴=1, 鍛ㄦ棩=7)
+    pub weekdays: Option<String>, // For weekly mode: "1,3,5" (周一=1, 周日=7)
     #[serde(rename = "activeWeekdays", alias = "active_weekdays", default)]
     pub active_weekdays: Option<String>,
     #[serde(rename = "specificDates", alias = "specific_dates")]
@@ -231,10 +311,10 @@ pub struct TodoItem {
     #[serde(rename = "parentId", alias = "parent_id")]
     pub parent_id: Option<String>, // 鐖跺緟鍔濱D锛孨one琛ㄧず鏄《绾у緟鍔?
     #[serde(rename = "expanded", default = "serde_aux::default_true")]
-    pub expanded: bool, // 鏄惁灞曞紑瀛愬緟鍔?
+    pub expanded: bool, // 是否展开子待办
     pub completed: bool,
     #[serde(default)]
-    pub disabled: bool, // 鏄惁绂佺敤锛岀鐢ㄥ悗浠诲姟浼氬彉鎴愬畬鎴愮姸鎬佷笖鏃犳硶鎿嶄綔
+    pub disabled: bool, // 是否禁用，禁用后任务会变成完成状态且无法操作
     #[serde(rename = "inactiveByWeekday", alias = "inactive_by_weekday", default)]
     pub inactive_by_weekday: bool,
     #[serde(rename = "createdAt", alias = "created_at")]
@@ -245,7 +325,7 @@ pub struct TodoItem {
     pub last_reset_date: Option<String>, // YYYY-MM-DD for daily/weekly items
     #[serde(rename = "expiryDate", alias = "expiry_date")]
     #[serde(default)]
-    pub expiry_date: Option<String>, // YYYY-MM-DD 鏍煎紡锛屼粎鐢ㄤ簬瀛愬緟鍔?
+    pub expiry_date: Option<String>, // YYYY-MM-DD 格式，仅用于子待办
     #[serde(rename = "cycleStartDate", alias = "cycle_start_date", default)]
     pub cycle_start_date: Option<String>,
     #[serde(rename = "cycleActiveDays", alias = "cycle_active_days", default)]
@@ -253,13 +333,13 @@ pub struct TodoItem {
     #[serde(rename = "cycleIntervalWeeks", alias = "cycle_interval_weeks", default)]
     pub cycle_interval_weeks: Option<u32>,
     #[serde(rename = "priority", default)]
-    pub priority: Option<u8>, // 1, 2, 3 鎴?None锛屽彧瀵圭埗寰呭姙鏈夋晥
+    pub priority: Option<u8>, // 1, 2, 3 或 None，只对父待办有效
     #[serde(rename = "order", default)]
-    pub order: Option<i32>, // 鎺掑簭瀛楁锛岀敤浜庢墜鍔ㄨ皟鏁村緟鍔為『搴?
+    pub order: Option<i32>, // 排序字段，用于手动调整待办顺序
     #[serde(rename = "weekStart", alias = "week_start", default)]
-    pub week_start: Option<String>, // YYYY-MM-DD 鏍煎紡锛岃褰曞懆寰呭姙鎵€灞炲懆鐨勫懆涓€锛屼粎鐢ㄤ簬 weekly_this_week 妯″紡
+    pub week_start: Option<String>, // YYYY-MM-DD 格式，记录周待办所属周的周一，仅用于 weekly_this_week 模式
     #[serde(rename = "monthStart", alias = "month_start", default)]
-    pub month_start: Option<String>, // YYYY-MM-DD 鏍煎紡锛岃褰曟湀寰呭姙鎵€灞炴湀鐨勭涓€澶╋紝浠呯敤浜?monthly_this_month 妯″紡
+    pub month_start: Option<String>, // YYYY-MM-DD 格式，记录月待办所属月的第一天，仅用于 monthly_this_month 模式
 }
 
 // Helper module for serde default value
@@ -277,9 +357,9 @@ impl TodoItem {
             active_weekdays: None,
             specific_dates: None,
             parent_id,
-            expanded: true, // 榛樿灞曞紑
+            expanded: true, // 默认展开
             completed: false,
-            disabled: false, // 榛樿涓嶇鐢?
+            disabled: false, // 默认不禁用
             inactive_by_weekday: false,
             created_at: Local::now().timestamp(),
             completed_at: None,
@@ -622,7 +702,7 @@ impl TodoStore {
             return false;
         }
 
-        // For "weekly_this_week" mode (鍛ㄥ緟鍔?, show if target date is in the same week as the todo
+        // For "weekly_this_week" mode (周待办), show if target date is in the same week as the todo
         if todo.repeat_mode == "weekly_this_week" {
             if let Some(week_start_str) = &todo.week_start {
                 // Parse the week_start (Monday of the week)
@@ -646,7 +726,7 @@ impl TodoStore {
             return true; // No week_start, always show
         }
 
-        // For "monthly_this_month" mode (鏈湀寰呭姙), show if target date is in the same month as the todo
+        // For "monthly_this_month" mode (本月待办), show if target date is in the same month as the todo
         if todo.repeat_mode == "monthly_this_month" {
             if let Some(month_start_str) = &todo.month_start {
                 // Parse the month_start (first day of the month)

@@ -8,7 +8,7 @@ export interface TodoItem {
   weekdays?: string; // For weekly mode: "1,3,5" (周一=1, 周日=7)
   activeWeekdays?: string; // For subtodos: "1,5,6" (周一=1, 周日=7)
   specificDates?: string; // For specific_dates mode: "2025-03-10,2025-03-11"
-  parentId?: string; // 父待办ID，undefined表示是顶级待办
+  parentId?: string; // 父待办 ID，undefined 表示顶级待办
   expanded: boolean; // 是否展开子待办
   completed: boolean;
   disabled?: boolean; // 是否禁用，禁用后任务会变成完成状态且无法操作

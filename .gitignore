@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 .claude/settings.local.json
+data/recovery/
 *.bak
 *_patch.txt
 

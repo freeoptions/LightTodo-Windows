@@ -50,5 +50,24 @@ export function useSettings() {
     }
   };
 
-  return { settings, loading, error, loadSettings, updateShortcut, updatePriorityColor, updateAutoLaunch };
+  const updateBackgroundWallpaper = async (wallpaper: string | null) => {
+    try {
+      settings.value = await invoke<Settings>('update_background_wallpaper', {
+        wallpaper,
+      });
+    } catch (e) {
+      throw new Error(String(e));
+    }
+  };
+
+  return {
+    settings,
+    loading,
+    error,
+    loadSettings,
+    updateShortcut,
+    updatePriorityColor,
+    updateAutoLaunch,
+    updateBackgroundWallpaper,
+  };
 }

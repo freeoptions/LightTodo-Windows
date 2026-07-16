@@ -76,7 +76,7 @@ const canOperate = computed(() => !isDisabled.value);
 // Can edit? (not completed and can operate)
 const canEdit = computed(() => !props.todo.completed && canOperate.value);
 const statusBadgeText = computed(() => {
-  if (isInactiveByWeekday.value) return '本日未启用';
+  if (isInactiveByWeekday.value) return '今日停用';
   if (props.todo.disabled) return '已禁用';
   return '';
 });
@@ -101,7 +101,7 @@ const shouldDisableCheckbox = computed(() => {
   return true;
 });
 
-const weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
+const weekdayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 
 const repeatModeLabels: Record<TodoItemType['repeatMode'], string> = {
   daily: '每天重复',
@@ -203,7 +203,7 @@ const weeklyDisplayText = computed(() => {
     .filter(d => d)
     .join('、');
 
-  return days ? `每周【${days}】` : '每周重复';
+  return days ? `每周 ${days}` : '每周重复';
 });
 
 // Format specific dates display
@@ -218,7 +218,7 @@ const specificDatesDisplay = computed(() => {
     .filter(d => d)
     .join('、');
 
-  return dates ? `指定日期【${dates}】` : '指定日期';
+  return dates ? `指定 ${dates}` : '指定日期';
 });
 
 const repeatModeDisplay = computed(() => {
@@ -328,16 +328,19 @@ const handleTodoItemClick = (e: Event) => {
           @click.prevent.stop="handleCheckboxClick"
         />
         <span class="checkbox-icon" @click.prevent.stop="handleCheckboxClick">
-          <span class="icon-unchecked">⃞</span>
-          <span class="icon-checked">✅</span>
+          <span class="check-mark"></span>
         </span>
       </label>
       <span v-if="statusBadgeText" class="todo-item-status-badge">{{ statusBadgeText }}</span>
       <!-- Expiry date icon (for both parent todos and subtodos) - separate column -->
       <span v-if="todo.expiryDate" class="todo-item-expiry-icon-wrapper">
-        <span class="todo-item-expiry-icon" :class="{ 'is-expired': isExpired }">📅</span>
+        <span class="todo-item-expiry-icon" :class="{ 'is-expired': isExpired }">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 2v4M16 2v4M3.5 9.5h17M5.5 4.5h13A2 2 0 0 1 20.5 6.5v12A2 2 0 0 1 18.5 20.5h-13A2 2 0 0 1 3.5 18.5v-12A2 2 0 0 1 5.5 4.5Z" />
+          </svg>
+        </span>
         <span class="expiry-tooltip">
-          截止日期：{{ expiryDateDisplay }}<span v-if="isExpired">（已过期）</span>
+          到期日：{{ expiryDateDisplay }}<span v-if="isExpired">（已过期）</span>
         </span>
       </span>
       <div class="todo-item-content">
@@ -348,7 +351,7 @@ const handleTodoItemClick = (e: Event) => {
           </span>
           <span class="todo-item-repeat">{{ repeatModeDisplay }}</span>
           <span v-if="hasSubtodos" class="todo-item-subtodo-count">
-            {{ activeSubtodos.length }} 个子待办
+            {{ activeSubtodos.length }}
           </span>
         </span>
       </div>
@@ -384,7 +387,7 @@ const handleTodoItemClick = (e: Event) => {
           :class="{ 'active': !isDisabled }"
           @click.prevent.stop="emit('toggle-disable', todo.id)"
           :aria-label="isDisabled ? '启用' : '禁用'"
-          :title="isDisabled ? '启用（恢复操作）' : '禁用（标记完成并禁止操作）'"
+          :title="isDisabled ? '启用这个待办' : '禁用这个待办'"
         >
           <span class="toggle-slider"></span>
         </button>
@@ -394,9 +397,10 @@ const handleTodoItemClick = (e: Event) => {
           v-if="!isSubtodo && !todo.completed && canOperate"
           class="todo-item-add-sub"
           @click.prevent.stop="emit('add-subtodo', todo.id)"
+          aria-label="添加子待办"
           title="添加子待办"
         >
-          ➕
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
         </button>
 
         <button
@@ -406,7 +410,7 @@ const handleTodoItemClick = (e: Event) => {
           aria-label="编辑"
           title="编辑"
         >
-          ✏️
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z" /></svg>
         </button>
         <button
           v-if="canOperate"
@@ -415,7 +419,7 @@ const handleTodoItemClick = (e: Event) => {
           aria-label="删除"
           title="删除"
         >
-          ❎
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4h8v2" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v5M14 11v5" /></svg>
         </button>
       </div>
     </div>
@@ -454,12 +458,12 @@ const handleTodoItemClick = (e: Event) => {
           @click.prevent.stop="disabledSubtodosExpanded = !disabledSubtodosExpanded"
         >
           <span class="disabled-subtodos-toggle-left">
-            <span class="disabled-subtodos-badge">已禁用</span>
+            <span class="disabled-subtodos-badge">停用</span>
             <span class="disabled-subtodos-title">
-              {{ disabledSubtodosExpanded ? '收起禁用子待办' : `展开禁用子待办（${disabledSubtodos.length}项）` }}
+              {{ disabledSubtodosExpanded ? '收起停用子待办' : `查看停用子待办 ${disabledSubtodos.length} 个` }}
             </span>
           </span>
-          <span class="disabled-subtodos-arrow">{{ disabledSubtodosExpanded ? '▾' : '▸' }}</span>
+          <span class="disabled-subtodos-arrow">{{ disabledSubtodosExpanded ? '收起' : '展开' }}</span>
         </button>
 
         <div v-if="disabledSubtodosExpanded" class="disabled-subtodos-list">
@@ -700,30 +704,31 @@ const handleTodoItemClick = (e: Event) => {
   justify-content: center;
   width: 20px;
   height: 20px;
-  font-size: 20px;
-  line-height: 1;
+  border: 2px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
   transition: all 0.2s;
   position: relative;
   z-index: 101;
 }
 
-.icon-unchecked {
-  display: block;
-  color: var(--border-color);
-  font-size: 26px;
+.check-mark {
+  width: 10px;
+  height: 6px;
+  border-left: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  transform: rotate(-45deg) translate(1px, -1px);
+  opacity: 0;
+  transition: opacity 0.16s ease;
 }
 
-.icon-checked {
-  display: none;
-  color: #22c55e;
+.todo-item-checkbox input:checked ~ .checkbox-icon {
+  border-color: #16a34a;
+  background: #16a34a;
 }
 
-.todo-item-checkbox input:checked ~ .checkbox-icon .icon-unchecked {
-  display: none;
-}
-
-.todo-item-checkbox input:checked ~ .checkbox-icon .icon-checked {
-  display: block;
+.todo-item-checkbox input:checked ~ .checkbox-icon .check-mark {
+  opacity: 1;
 }
 
 /* Non-today checkbox styles */
@@ -771,15 +776,24 @@ const handleTodoItemClick = (e: Event) => {
   gap: 4px;
   max-width: none;
   flex-wrap: nowrap;
-}
-
-/* 默认隐藏所有操作按钮 */
-.todo-item-actions button {
   opacity: 0;
-  transition: opacity 0.2s ease;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.16s ease, visibility 0.16s ease;
 }
 
-/* 鼠标悬停在待办项上时显示按钮 */
+.todo-item-actions button {
+  opacity: 0.62;
+  transition: opacity 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.todo-item:hover .todo-item-actions,
+.todo-item:focus-within .todo-item-actions {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
 .todo-item:hover .todo-item-actions button {
   opacity: 1;
 }
@@ -790,8 +804,8 @@ const handleTodoItemClick = (e: Event) => {
 .todo-item-delete,
 .todo-item-add-sub,
 .todo-item-disable {
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -806,12 +820,14 @@ const handleTodoItemClick = (e: Event) => {
   flex-shrink: 0;
 }
 
-.todo-item-move-up,
-.todo-item-move-down,
-.todo-item-edit,
-.todo-item-delete,
-.todo-item-add-sub {
-  opacity: 0;
+.todo-item-actions svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .todo-item-move-up:hover,
@@ -823,10 +839,6 @@ const handleTodoItemClick = (e: Event) => {
 .todo-item-move-up,
 .todo-item-move-down {
   font-size: 17px;
-}
-
-.todo-item-add-sub {
-  font-size: 14px;
 }
 
 .todo-item-edit:hover {
