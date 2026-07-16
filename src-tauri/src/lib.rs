@@ -692,10 +692,24 @@ async fn move_todo_up(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, St
         }
     };
 
-    // Find all siblings with same parent_id (only parent todos for moving)
+    let current_todo = todos[idx].clone();
+
+    // Find siblings in the same visible move group. This avoids swapping with completed,
+    // disabled, or different-priority items that are currently rendered in another group.
     let sibling_indices: Vec<usize> = todos.iter()
         .enumerate()
-        .filter(|(_, t)| t.parent_id == parent_id)
+        .filter(|(_, t)| {
+            if t.parent_id != parent_id {
+                return false;
+            }
+            if parent_id.is_none() {
+                t.priority == current_todo.priority
+                    && t.completed == current_todo.completed
+                    && t.disabled == current_todo.disabled
+            } else {
+                t.completed == current_todo.completed && t.disabled == current_todo.disabled
+            }
+        })
         .map(|(i, _)| i)
         .collect();
     eprintln!("=== [MOVE UP] Found {} siblings with parent_id={:?}", sibling_indices.len(), parent_id);
@@ -752,10 +766,24 @@ async fn move_todo_down(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
         }
     };
 
-    // Find all siblings with same parent_id
+    let current_todo = todos[idx].clone();
+
+    // Find siblings in the same visible move group. This avoids swapping with completed,
+    // disabled, or different-priority items that are currently rendered in another group.
     let sibling_indices: Vec<usize> = todos.iter()
         .enumerate()
-        .filter(|(_, t)| t.parent_id == parent_id)
+        .filter(|(_, t)| {
+            if t.parent_id != parent_id {
+                return false;
+            }
+            if parent_id.is_none() {
+                t.priority == current_todo.priority
+                    && t.completed == current_todo.completed
+                    && t.disabled == current_todo.disabled
+            } else {
+                t.completed == current_todo.completed && t.disabled == current_todo.disabled
+            }
+        })
         .map(|(i, _)| i)
         .collect();
     eprintln!("=== [MOVE DOWN] Found {} siblings with parent_id={:?}", sibling_indices.len(), parent_id);

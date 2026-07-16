@@ -35,9 +35,11 @@ const newTodoRepeatMode = ref<RepeatMode>('daily'); // 默认每天重复
 const newTodoWeekdays = ref<number[]>([]); // 选中的周几 (1-7, 周一=1, 周日=7)
 const newTodoSpecificDates = ref<string[]>([]); // 选中的指定日期
 const newSubtodoCycleEnabled = ref(false);
+const newSubtodoExpiryDate = ref('');
 const newSubtodoCycleStartDate = ref('');
 const newSubtodoCycleActiveDays = ref(7);
 const newSubtodoCycleIntervalWeeks = ref(4);
+const subtodoValidationMessage = ref('');
 const weekdayOptions = [
   { value: 1, label: '周一' },
   { value: 2, label: '周二' },
@@ -62,6 +64,7 @@ const editingSubtodo = ref(false); // true if editing a subtodo (not parent)
 const modalSubtodos = ref<Array<{
   id: string;
   content: string;
+  expiryDate?: string;
   cycleStartDate?: string;
   cycleActiveDays?: number;
   cycleIntervalWeeks?: number;
@@ -90,6 +93,33 @@ const currentWindow = getCurrentWindow();
 const applyBackgroundWallpaper = (wallpaper: string | null) => {
   backgroundWallpaper.value = wallpaper;
   document.documentElement.style.setProperty('--app-wallpaper-image', wallpaper ? `url("${wallpaper}")` : 'none');
+};
+
+const dateAccentColors = [
+  '#2563eb',
+  '#0891b2',
+  '#0f766e',
+  '#16a34a',
+  '#65a30d',
+  '#ca8a04',
+  '#ea580c',
+  '#dc2626',
+  '#e11d48',
+  '#db2777',
+  '#9333ea',
+  '#7c3aed',
+  '#4f46e5',
+  '#0284c7',
+  '#047857',
+  '#b45309',
+];
+
+const getDateAccentColor = (isoDate: string) => {
+  let hash = 0;
+  for (let i = 0; i < isoDate.length; i += 1) {
+    hash = (hash * 31 + isoDate.charCodeAt(i)) >>> 0;
+  }
+  return dateAccentColors[hash % dateAccentColors.length];
 };
 
 // Format current date
@@ -148,6 +178,8 @@ const viewDateDisplay = computed(() => {
 const isViewingToday = computed(() => {
   return viewDate.value === '' || viewDate.value === currentDate.value.isoDate;
 });
+
+const dateAccentColor = computed(() => getDateAccentColor(viewDateDisplay.value.isoDate));
 
 const activeParentTabId = ref<string | null>(null);
 
@@ -312,9 +344,11 @@ onMounted(async () => {
 
 const resetSubtodoCycleForm = () => {
   newSubtodoCycleEnabled.value = false;
+  newSubtodoExpiryDate.value = '';
   newSubtodoCycleStartDate.value = '';
   newSubtodoCycleActiveDays.value = 7;
   newSubtodoCycleIntervalWeeks.value = 4;
+  subtodoValidationMessage.value = '';
 };
 
 const getSubtodoCyclePayload = () => {
@@ -334,6 +368,11 @@ const getSubtodoCyclePayload = () => {
     cycleActiveDays: activeDays,
     cycleIntervalWeeks: intervalWeeks,
   };
+};
+
+const getSubtodoExpiryDatePayload = () => {
+  if (newSubtodoCycleEnabled.value) return null;
+  return newSubtodoExpiryDate.value || null;
 };
 
 // Open modal for adding
@@ -401,11 +440,15 @@ const openEditModal = async (id: string) => {
 
     if (isSubtodo && todo.cycleStartDate) {
       newSubtodoCycleEnabled.value = true;
+      newSubtodoExpiryDate.value = '';
       newSubtodoCycleStartDate.value = todo.cycleStartDate;
       newSubtodoCycleActiveDays.value = todo.cycleActiveDays || 7;
       newSubtodoCycleIntervalWeeks.value = todo.cycleIntervalWeeks || 4;
     } else {
       resetSubtodoCycleForm();
+      if (isSubtodo) {
+        newSubtodoExpiryDate.value = todo.expiryDate || '';
+      }
     }
 
     // Load subtodos if editing a parent todo
@@ -413,6 +456,7 @@ const openEditModal = async (id: string) => {
       modalSubtodos.value = todo.subtodos.map(st => ({
         id: st.id,
         content: st.content,
+        expiryDate: st.expiryDate,
         cycleStartDate: st.cycleStartDate,
         cycleActiveDays: st.cycleActiveDays,
         cycleIntervalWeeks: st.cycleIntervalWeeks,
@@ -626,8 +670,9 @@ const buildTodoTreeFromFlat = (flatTodos: TodoItemType[]): TodoItemType[] => {
 // Submit new todo or edit
 const submitAddTodo = async () => {
   if (!newTodoContent.value.trim()) return;
+  subtodoValidationMessage.value = '';
   if ((editingSubtodo.value || addingSubtodoForParentId.value) && newSubtodoCycleEnabled.value && !newSubtodoCycleStartDate.value) {
-    alert('请先选择首轮启用日期');
+    subtodoValidationMessage.value = '请先选择首轮启用日期';
     return;
   }
 
@@ -642,6 +687,7 @@ const submitAddTodo = async () => {
       ? newTodoSpecificDates.value.sort().join(',')
       : undefined;
     const subtodoCyclePayload = getSubtodoCyclePayload();
+    const subtodoExpiryDate = getSubtodoExpiryDatePayload();
 
     console.log("=== [SUBMIT] Starting submission, modalSubtodos.length =", modalSubtodos.value.length);
     console.log("=== [SUBMIT] newSubtodoContent =", newSubtodoContent.value.trim());
@@ -657,6 +703,7 @@ const submitAddTodo = async () => {
         repeatMode: newTodoRepeatMode.value,
         weekdays: weekdaysStr,
         specificDates: specificDatesStr,
+        expiryDate: editingSubtodo.value ? subtodoExpiryDate : null,
         cycleStartDate: editingSubtodo.value ? subtodoCyclePayload.cycleStartDate : null,
         cycleActiveDays: editingSubtodo.value ? subtodoCyclePayload.cycleActiveDays : null,
         cycleIntervalWeeks: editingSubtodo.value ? subtodoCyclePayload.cycleIntervalWeeks : null,
@@ -692,6 +739,7 @@ const submitAddTodo = async () => {
               repeatMode: 'none',
               weekdays: null,
               parentId: editingTodoId.value,
+              expiryDate: subtodo.expiryDate || null,
               cycleStartDate: subtodo.cycleStartDate || null,
               cycleActiveDays: subtodo.cycleActiveDays || null,
               cycleIntervalWeeks: subtodo.cycleIntervalWeeks || null,
@@ -713,6 +761,7 @@ const submitAddTodo = async () => {
         weekdays: null,
         specificDates: null,
         parentId: addingSubtodoForParentId.value,
+        expiryDate: subtodoExpiryDate,
         cycleStartDate: subtodoCyclePayload.cycleStartDate,
         cycleActiveDays: subtodoCyclePayload.cycleActiveDays,
         cycleIntervalWeeks: subtodoCyclePayload.cycleIntervalWeeks,
@@ -774,6 +823,7 @@ const submitAddTodo = async () => {
               repeatMode: 'none',
               weekdays: null,
               parentId: parentId,
+              expiryDate: subtodo.expiryDate || null,
               cycleStartDate: subtodo.cycleStartDate || null,
               cycleActiveDays: subtodo.cycleActiveDays || null,
               cycleIntervalWeeks: subtodo.cycleIntervalWeeks || null,
@@ -863,7 +913,7 @@ const goToToday = async () => {
         <div class="header-content">
           <div class="date-info">
             <div class="date-main">
-              <span class="date-text">{{ viewDateDisplay.date }}</span>
+              <span class="date-text" :style="{ color: dateAccentColor }">{{ viewDateDisplay.date }}</span>
               <span class="weekday-text">{{ viewDateDisplay.weekday }}</span>
             </div>
             <div class="lunar-info">
@@ -1105,30 +1155,42 @@ const goToToday = async () => {
           </div>
 
           <div v-if="addingSubtodoForParentId || editingSubtodo" class="form-group cycle-form-group">
-            <label class="form-label">启用方式</label>
+            <label class="form-label">启用规则</label>
+            <div v-if="subtodoValidationMessage" class="inline-validation" role="alert">
+              <svg class="inline-validation-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 8v5M12 17h.01M10.3 3.9 2.9 17.1A2 2 0 0 0 4.6 20h14.8a2 2 0 0 0 1.7-2.9L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+              </svg>
+              <span>{{ subtodoValidationMessage }}</span>
+            </div>
             <div class="cycle-mode-options">
               <button
                 type="button"
                 class="cycle-mode-option"
                 :class="{ active: !newSubtodoCycleEnabled }"
-                @click="newSubtodoCycleEnabled = false"
+                @click="newSubtodoCycleEnabled = false; subtodoValidationMessage = ''"
               >
-                普通启用
+                截止启用
               </button>
               <button
                 type="button"
                 class="cycle-mode-option"
                 :class="{ active: newSubtodoCycleEnabled }"
-                @click="newSubtodoCycleEnabled = true"
+                @click="newSubtodoCycleEnabled = true; subtodoValidationMessage = ''"
               >
                 周期启用
               </button>
             </div>
-            <span v-if="!newSubtodoCycleEnabled" class="form-hint">普通启用不会按固定周期自动禁用或恢复。</span>
+            <div v-if="!newSubtodoCycleEnabled" class="expiry-config-panel">
+              <label class="cycle-config-field">
+                <span>自动禁用日期（可选）</span>
+                <input type="date" v-model="newSubtodoExpiryDate" class="form-input" @input="subtodoValidationMessage = ''" />
+              </label>
+              <span class="form-hint">不填则长期有效；填写后，超过所选日期才会自动禁用。</span>
+            </div>
             <div v-if="newSubtodoCycleEnabled" class="cycle-config-panel">
               <label class="cycle-config-field">
                 <span>首轮启用日期</span>
-                <input type="date" v-model="newSubtodoCycleStartDate" class="form-input" />
+                <input type="date" v-model="newSubtodoCycleStartDate" class="form-input" @input="subtodoValidationMessage = ''" />
               </label>
               <label class="cycle-config-field">
                 <span>启用天数</span>
@@ -1234,8 +1296,8 @@ const goToToday = async () => {
 <style>
 :root {
   --bg-primary: #ffffff;
-  --bg-secondary: #f4f6f8;
-  --bg-app: #eef2f3;
+  --bg-secondary: #f7f9fc;
+  --bg-app: #ffffff;
   --text-primary: #17212b;
   --text-secondary: #65717f;
   --border-color: #d8e0e7;
@@ -1296,7 +1358,7 @@ body:hover::-webkit-scrollbar-thumb {
   min-height: 100vh;
   position: relative;
   isolation: isolate;
-  background: linear-gradient(rgba(238, 242, 243, 0.72), rgba(238, 242, 243, 0.72));
+  background: linear-gradient(rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.86));
 }
 
 #app::before {
@@ -1392,6 +1454,7 @@ body:hover::-webkit-scrollbar-thumb {
   letter-spacing: 0;
   line-height: 1.1;
   white-space: nowrap;
+  transition: color 0.2s ease;
 }
 
 .weekday-text {
@@ -1412,15 +1475,17 @@ body:hover::-webkit-scrollbar-thumb {
 .parent-tabs {
   position: sticky;
   top: 0;
-  z-index: 80;
+  z-index: 320;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 -4px 16px;
-  padding: 10px 4px;
+  margin: 0 -18px 16px;
+  padding: 10px 18px 12px;
   overflow-x: auto;
   scrollbar-width: none;
-  background: linear-gradient(180deg, rgba(238, 242, 243, 0.98), rgba(238, 242, 243, 0.88));
+  background: rgba(255, 255, 255, 0.96);
+  border-bottom: 1px solid rgba(216, 224, 231, 0.82);
+  box-shadow: 0 12px 20px rgba(23, 33, 43, 0.06);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
 }
@@ -1685,7 +1750,7 @@ body:hover::-webkit-scrollbar-thumb {
 }
 
 .todo-item-wrapper[id^="todo-"] {
-  scroll-margin-top: 68px;
+  scroll-margin-top: 82px;
 }
 
 .error-message {
@@ -2025,6 +2090,32 @@ body:hover::-webkit-scrollbar-thumb {
   gap: 8px;
 }
 
+.inline-validation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid rgba(239, 68, 68, 0.22);
+  border-radius: 8px;
+  background: rgba(254, 242, 242, 0.96);
+  color: #b91c1c;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.inline-validation-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .cycle-mode-option {
   height: 36px;
   border: 1px solid var(--border-color);
@@ -2049,7 +2140,8 @@ body:hover::-webkit-scrollbar-thumb {
   box-shadow: 0 8px 18px rgba(37, 99, 235, 0.16);
 }
 
-.cycle-config-panel {
+.cycle-config-panel,
+.expiry-config-panel {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
@@ -2069,11 +2161,13 @@ body:hover::-webkit-scrollbar-thumb {
   color: var(--text-secondary);
 }
 
-.cycle-config-field:first-child {
+.cycle-config-field:first-child,
+.expiry-config-panel .cycle-config-field {
   grid-column: 1 / -1;
 }
 
-.cycle-config-panel .form-hint {
+.cycle-config-panel .form-hint,
+.expiry-config-panel .form-hint {
   grid-column: 1 / -1;
   margin-top: 0;
   line-height: 1.45;

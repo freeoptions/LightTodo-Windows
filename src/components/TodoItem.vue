@@ -233,20 +233,22 @@ const repeatModeDisplay = computed(() => {
 
 // Format expiry date display
 const expiryDateDisplay = computed(() => {
-  if (!props.todo.expiryDate) return '';
-  const date = new Date(props.todo.expiryDate + 'T00:00:00');
+  if (!todoExpiryDate.value) return '';
+  const date = new Date(todoExpiryDate.value + 'T00:00:00');
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 });
 
+const todoExpiryDate = computed(() => props.todo.expiryDate || (props.todo as TodoItemType & { expiry_date?: string }).expiry_date || '');
+
 // Check if expiry date is in the past (expired)
 const isExpired = computed(() => {
-  if (!props.todo.expiryDate) return false;
+  if (!todoExpiryDate.value) return false;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const expiryDate = new Date(props.todo.expiryDate + 'T00:00:00');
+  const expiryDate = new Date(todoExpiryDate.value + 'T00:00:00');
   return expiryDate < today;
 });
 
@@ -333,14 +335,14 @@ const handleTodoItemClick = (e: Event) => {
       </label>
       <span v-if="statusBadgeText" class="todo-item-status-badge">{{ statusBadgeText }}</span>
       <!-- Expiry date icon (for both parent todos and subtodos) - separate column -->
-      <span v-if="todo.expiryDate" class="todo-item-expiry-icon-wrapper">
+      <span v-if="todoExpiryDate" class="todo-item-expiry-icon-wrapper">
         <span class="todo-item-expiry-icon" :class="{ 'is-expired': isExpired }">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M8 2v4M16 2v4M3.5 9.5h17M5.5 4.5h13A2 2 0 0 1 20.5 6.5v12A2 2 0 0 1 18.5 20.5h-13A2 2 0 0 1 3.5 18.5v-12A2 2 0 0 1 5.5 4.5Z" />
           </svg>
         </span>
         <span class="expiry-tooltip">
-          到期日：{{ expiryDateDisplay }}<span v-if="isExpired">（已过期）</span>
+          截止日期：{{ expiryDateDisplay }}<span v-if="isExpired">（已过期）</span>
         </span>
       </span>
       <div class="todo-item-content">
@@ -630,18 +632,37 @@ const handleTodoItemClick = (e: Event) => {
 }
 
 .todo-item-expiry-icon {
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #b45309;
   cursor: help;
-  opacity: 0.7;
-  transition: opacity 0.2s;
+  opacity: 0.95;
+  transition: background 0.2s, color 0.2s, opacity 0.2s;
 }
 
 .todo-item-expiry-icon:hover {
   opacity: 1;
+  background: rgba(245, 158, 11, 0.2);
+}
+
+.todo-item-expiry-icon svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .todo-item-expiry-icon.is-expired {
   color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
   opacity: 0.8;
 }
 
@@ -687,7 +708,7 @@ const handleTodoItemClick = (e: Event) => {
   position: relative;
   cursor: pointer;
   flex-shrink: 0;
-  z-index: 100;
+  z-index: 1;
 }
 
 .todo-item-checkbox input[type="checkbox"] {
@@ -709,7 +730,7 @@ const handleTodoItemClick = (e: Event) => {
   background: var(--bg-primary);
   transition: all 0.2s;
   position: relative;
-  z-index: 101;
+  z-index: 1;
 }
 
 .check-mark {
@@ -773,7 +794,7 @@ const handleTodoItemClick = (e: Event) => {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   max-width: none;
   flex-wrap: nowrap;
   opacity: 0;
@@ -804,8 +825,8 @@ const handleTodoItemClick = (e: Event) => {
 .todo-item-delete,
 .todo-item-add-sub,
 .todo-item-disable {
-  width: 24px;
-  height: 24px;
+  width: 30px;
+  height: 30px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -821,8 +842,8 @@ const handleTodoItemClick = (e: Event) => {
 }
 
 .todo-item-actions svg {
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
   fill: none;
   stroke: currentColor;
   stroke-width: 2;

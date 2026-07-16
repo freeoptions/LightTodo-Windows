@@ -1187,7 +1187,7 @@ impl TodoStore {
                 }
 
                 if let Some(expiry) = &todo.expiry_date {
-                    // Check if view date is past expiry date
+                    // The expiry date itself is still valid; disable only after that date.
                     if date_to_check > expiry.as_str() {
                         // Dynamically disable this expired subtodo
                         todo.disabled = true;

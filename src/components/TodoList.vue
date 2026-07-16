@@ -76,6 +76,20 @@ onBeforeUnmount(() => {
 
 const incompleteTodos = computed(() => activeTodos.value.filter((t) => !t.completed || isPendingSink(t)));
 const completedTodos = computed(() => activeTodos.value.filter((t) => t.completed && !isPendingSink(t)));
+
+const getMoveGroupKey = (todo: TodoItemType) => {
+  return `${todo.priority ?? 'none'}|${todo.completed ? 'done' : 'open'}|${todo.disabled ? 'disabled' : 'enabled'}`;
+};
+
+const getParentMoveIndex = (list: TodoItemType[], todo: TodoItemType) => {
+  const key = getMoveGroupKey(todo);
+  return list.filter((item) => getMoveGroupKey(item) === key).findIndex((item) => item.id === todo.id);
+};
+
+const getParentMoveTotal = (list: TodoItemType[], todo: TodoItemType) => {
+  const key = getMoveGroupKey(todo);
+  return list.filter((item) => getMoveGroupKey(item) === key).length;
+};
 </script>
 
 <template>
@@ -101,11 +115,11 @@ const completedTodos = computed(() => activeTodos.value.filter((t) => t.complete
         </div>
         <div v-else class="todo-list-items">
           <TodoItem
-            v-for="(todo, index) in incompleteTodos"
+            v-for="todo in incompleteTodos"
             :key="todo.id"
             :todo="todo"
-            :parent-index="index"
-            :parent-total="incompleteTodos.length"
+            :parent-index="getParentMoveIndex(incompleteTodos, todo)"
+            :parent-total="getParentMoveTotal(incompleteTodos, todo)"
             :is-today="isToday"
             @toggle="emit('toggle', $event)"
             @delete="emit('delete', $event)"
@@ -128,11 +142,11 @@ const completedTodos = computed(() => activeTodos.value.filter((t) => t.complete
         </div>
         <div v-else class="todo-list-items">
           <TodoItem
-            v-for="(todo, index) in completedTodos"
+            v-for="todo in completedTodos"
             :key="todo.id"
             :todo="todo"
-            :parent-index="incompleteTodos.length + index"
-            :parent-total="activeTodos.length"
+            :parent-index="getParentMoveIndex(completedTodos, todo)"
+            :parent-total="getParentMoveTotal(completedTodos, todo)"
             :is-today="isToday"
             @toggle="emit('toggle', $event)"
             @delete="emit('delete', $event)"
