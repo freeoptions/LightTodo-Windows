@@ -1059,15 +1059,6 @@ fn update_auto_launch(store: State<'_, SettingsStore>, enabled: bool) -> Result<
     Ok(settings)
 }
 
-/// Update background wallpaper stored in settings as a data URL.
-#[tauri::command]
-fn update_background_wallpaper(store: State<'_, SettingsStore>, wallpaper: Option<String>) -> Result<Settings, String> {
-    let mut settings = store.load()?;
-    settings.background_wallpaper = wallpaper.filter(|value| !value.trim().is_empty());
-    store.save(&settings)?;
-    Ok(settings)
-}
-
 /// Save window state
 #[tauri::command]
 fn save_window_state(
@@ -1734,7 +1725,6 @@ pub fn run() {
             update_memo_height,
             update_priority_color,
             update_auto_launch,
-            update_background_wallpaper,
             get_long_term_todos,
             add_long_term_todo,
             toggle_long_term_todo,

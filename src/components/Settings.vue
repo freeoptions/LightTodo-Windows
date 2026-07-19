@@ -5,7 +5,6 @@ import ShortcutEditor from './ShortcutEditor.vue';
 
 const emit = defineEmits<{
   (e: 'shortcuts-changed', shortcuts: { showHideWindow: string }): void;
-  (e: 'wallpaper-changed', wallpaper: string | null): void;
 }>();
 
 const {
@@ -16,15 +15,10 @@ const {
   updateShortcut,
   updatePriorityColor,
   updateAutoLaunch,
-  updateBackgroundWallpaper,
 } = useSettings();
 
 const savingShortcut = ref<string | null>(null);
 const savingAutoLaunch = ref(false);
-const savingWallpaper = ref(false);
-const wallpaperInputRef = ref<HTMLInputElement | null>(null);
-
-const MAX_WALLPAPER_BYTES = 8 * 1024 * 1024;
 
 onMounted(() => {
   loadSettings();
@@ -64,56 +58,6 @@ const handleAutoLaunchChange = async (event: Event) => {
     alert('开机自启设置保存失败：' + (e as Error).message);
   } finally {
     savingAutoLaunch.value = false;
-  }
-};
-
-const handleWallpaperSelect = async (event: Event) => {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-
-  if (!file.type.startsWith('image/')) {
-    alert('请选择图片文件');
-    input.value = '';
-    return;
-  }
-
-  if (file.size > MAX_WALLPAPER_BYTES) {
-    alert('壁纸图片不能超过 8MB');
-    input.value = '';
-    return;
-  }
-
-  savingWallpaper.value = true;
-  try {
-    const wallpaper = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ''));
-      reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
-      reader.readAsDataURL(file);
-    });
-
-    await updateBackgroundWallpaper(wallpaper);
-    emit('wallpaper-changed', wallpaper);
-  } catch (e) {
-    await loadSettings();
-    alert('壁纸保存失败：' + (e as Error).message);
-  } finally {
-    savingWallpaper.value = false;
-    input.value = '';
-  }
-};
-
-const clearWallpaper = async () => {
-  savingWallpaper.value = true;
-  try {
-    await updateBackgroundWallpaper(null);
-    emit('wallpaper-changed', null);
-  } catch (e) {
-    await loadSettings();
-    alert('壁纸移除失败：' + (e as Error).message);
-  } finally {
-    savingWallpaper.value = false;
   }
 };
 
@@ -178,38 +122,6 @@ const formatShortcut = (shortcut: string): string => {
             </label>
             <span v-if="savingAutoLaunch" class="saving-hint">保存中...</span>
           </div>
-        </div>
-      </section>
-
-      <section class="settings-section">
-        <h3 class="section-title">背景壁纸</h3>
-        <div class="setting-item wallpaper-setting">
-          <div class="wallpaper-preview" :class="{ empty: !settings.backgroundWallpaper }">
-            <img v-if="settings.backgroundWallpaper" :src="settings.backgroundWallpaper" alt="当前壁纸预览" />
-            <span v-else>未设置壁纸</span>
-          </div>
-          <div class="wallpaper-actions">
-            <input
-              ref="wallpaperInputRef"
-              class="hidden-file-input"
-              type="file"
-              accept="image/*"
-              @change="handleWallpaperSelect"
-            />
-            <button class="btn-secondary" type="button" :disabled="savingWallpaper" @click="wallpaperInputRef?.click()">
-              选择图片
-            </button>
-            <button
-              class="btn-secondary danger"
-              type="button"
-              :disabled="savingWallpaper || !settings.backgroundWallpaper"
-              @click="clearWallpaper"
-            >
-              移除壁纸
-            </button>
-            <span v-if="savingWallpaper" class="saving-hint">保存中...</span>
-          </div>
-          <p class="setting-hint">支持 JPG、PNG、WebP 等图片，最大 8MB。图片会写入便携配置文件，移动 exe 后仍可显示。</p>
         </div>
       </section>
 
@@ -354,8 +266,7 @@ const formatShortcut = (shortcut: string): string => {
 }
 
 .setting-control,
-.toggle-control,
-.wallpaper-actions {
+.toggle-control {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -415,65 +326,6 @@ const formatShortcut = (shortcut: string): string => {
 .switch input:disabled + .switch-slider {
   cursor: not-allowed;
   opacity: 0.7;
-}
-
-.wallpaper-setting {
-  gap: 12px;
-}
-
-.wallpaper-preview {
-  width: 100%;
-  height: 118px;
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border-color, #d8e0e7);
-  background: var(--bg-primary, #ffffff);
-}
-
-.wallpaper-preview.empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-secondary, #65717f);
-  font-size: 13px;
-}
-
-.wallpaper-preview img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.hidden-file-input {
-  display: none;
-}
-
-.btn-secondary {
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid var(--border-color, #d8e0e7);
-  border-radius: 7px;
-  background: var(--bg-primary, #ffffff);
-  color: var(--text-primary, #17212b);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  border-color: var(--primary-color, #2563eb);
-  color: var(--primary-color, #2563eb);
-}
-
-.btn-secondary.danger:hover:not(:disabled) {
-  border-color: var(--danger-color, #ef4444);
-  color: var(--danger-color, #ef4444);
-}
-
-.btn-secondary:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
 }
 
 kbd,

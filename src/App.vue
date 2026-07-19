@@ -82,18 +82,12 @@ const showLongTermTodos = ref(false);
 const memo = ref('');
 const memoHeight = ref(80);
 const isSavingMemo = ref(false);
-const backgroundWallpaper = ref<string | null>(null);
 
 // View date state (for viewing todos on different days)
 const viewDate = ref('');
 const showDatePicker = ref(false);
 
 const currentWindow = getCurrentWindow();
-
-const applyBackgroundWallpaper = (wallpaper: string | null) => {
-  backgroundWallpaper.value = wallpaper;
-  document.documentElement.style.setProperty('--app-wallpaper-image', wallpaper ? `url("${wallpaper}")` : 'none');
-};
 
 const dateAccentColors = [
   '#2563eb',
@@ -320,7 +314,6 @@ onMounted(async () => {
     console.log('Frontend received settings:', settings);
     memo.value = settings.memo || '';
     memoHeight.value = settings.memoHeight || 80;
-    applyBackgroundWallpaper(settings.backgroundWallpaper || null);
   } catch (e) {
     console.error('Failed to load settings:', e);
   }
@@ -988,7 +981,6 @@ const goToToday = async () => {
           :title="tab.title"
           @click="scrollToParentTodo(tab.id)"
         >
-          <span class="parent-tab-status" aria-hidden="true"></span>
           <span class="parent-tab-title">{{ tab.title }}</span>
         </button>
       </nav>
@@ -1283,7 +1275,6 @@ const goToToday = async () => {
         <div class="modal-body modal-body-scroll">
           <Settings
             @shortcuts-changed="handleShortcutsChanged"
-            @wallpaper-changed="applyBackgroundWallpaper"
           />
         </div>
       </div>
@@ -1306,7 +1297,6 @@ const goToToday = async () => {
   --accent-color: #f59e0b;
   --success-color: #16a34a;
   --shadow: 0 10px 30px rgba(23, 33, 43, 0.08);
-  --app-wallpaper-image: none;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -1362,15 +1352,7 @@ body:hover::-webkit-scrollbar-thumb {
 }
 
 #app::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background-image: var(--app-wallpaper-image);
-  background-size: cover;
-  background-position: center;
-  opacity: 0.55;
+  content: none;
 }
 
 .app {
@@ -1478,16 +1460,18 @@ body:hover::-webkit-scrollbar-thumb {
   z-index: 320;
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 0 -18px 16px;
-  padding: 10px 18px 12px;
+  gap: 6px;
+  margin: 0 -18px 18px;
+  padding: 12px 18px 13px;
   overflow-x: auto;
   scrollbar-width: none;
-  background: rgba(255, 255, 255, 0.96);
-  border-bottom: 1px solid rgba(216, 224, 231, 0.82);
-  box-shadow: 0 12px 20px rgba(23, 33, 43, 0.06);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(255, 255, 255, 0.94) 100%);
+  border-top: 1px solid rgba(226, 232, 240, 0.78);
+  border-bottom: 1px solid rgba(226, 232, 240, 0.92);
+  box-shadow: 0 10px 18px rgba(15, 23, 42, 0.05);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
 }
 
 .parent-tabs::-webkit-scrollbar {
@@ -1497,47 +1481,42 @@ body:hover::-webkit-scrollbar-thumb {
 .parent-tab {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  max-width: 180px;
-  height: 33px;
+  max-width: 172px;
+  height: 31px;
   padding: 0 11px;
-  border: 1px solid rgba(216, 224, 231, 0.95);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.9);
-  color: #25313d;
+  border: 1px solid rgba(203, 213, 225, 0.92);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.74);
+  color: #1f2937;
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
-  box-shadow: 0 8px 18px rgba(23, 33, 43, 0.06);
+  box-shadow: none;
   cursor: pointer;
   flex: 0 0 auto;
-  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease, color 0.16s ease;
 }
 
 .parent-tab:hover,
 .parent-tab.active {
   transform: translateY(-1px);
-  border-color: rgba(37, 99, 235, 0.35);
-  box-shadow: 0 10px 22px rgba(37, 99, 235, 0.12);
+  border-color: rgba(37, 99, 235, 0.42);
+  background: rgba(239, 246, 255, 0.96);
+  color: #1d4ed8;
+  box-shadow: 0 8px 16px rgba(37, 99, 235, 0.09);
 }
 
 .parent-tab.completed {
-  border-color: rgba(22, 163, 74, 0.34);
-  background: linear-gradient(180deg, rgba(34, 197, 94, 0.92), rgba(22, 163, 74, 0.9));
-  color: #ffffff;
-  box-shadow: 0 10px 22px rgba(22, 163, 74, 0.18);
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(240, 253, 244, 0.96);
+  color: #166534;
+  box-shadow: none;
 }
 
-.parent-tab-status {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #f59e0b;
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.14);
-  flex: 0 0 auto;
-}
-
-.parent-tab.completed .parent-tab-status {
-  background: #ffffff;
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.22);
+.parent-tab.completed:hover,
+.parent-tab.completed.active {
+  border-color: rgba(22, 163, 74, 0.42);
+  background: rgba(220, 252, 231, 0.98);
+  color: #15803d;
+  box-shadow: 0 8px 16px rgba(22, 163, 74, 0.1);
 }
 
 .parent-tab-title {
@@ -1546,11 +1525,10 @@ body:hover::-webkit-scrollbar-thumb {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   line-height: 1.15;
   letter-spacing: 0;
-  transform: translateY(-0.5px);
 }
 
 .header-action-btn {

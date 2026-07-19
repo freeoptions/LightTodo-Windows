@@ -126,8 +126,6 @@ pub struct Settings {
     pub auto_launch: bool,
     #[serde(rename = "priorityColors", alias = "priority_colors", default)]
     pub priority_colors: Option<HashMap<u8, String>>,
-    #[serde(rename = "backgroundWallpaper", alias = "background_wallpaper", default)]
-    pub background_wallpaper: Option<String>,
 }
 
 fn default_memo_height() -> u32 {
@@ -147,7 +145,6 @@ impl Default for Settings {
             memo_height: 200,
             auto_launch: true,
             priority_colors: None,
-            background_wallpaper: None,
         }
     }
 }
@@ -225,12 +222,6 @@ impl SettingsStore {
             }
         }
 
-        if let Some(background_wallpaper) = value
-            .get("backgroundWallpaper")
-            .or_else(|| value.get("background_wallpaper"))
-        {
-            settings.background_wallpaper = background_wallpaper.as_str().map(|v| v.to_string());
-        }
     }
 
     fn salvage_settings_from_json(&self, content: &str) -> Option<Settings> {
@@ -309,7 +300,7 @@ pub struct TodoItem {
     #[serde(default)]
     pub specific_dates: Option<String>, // For specific_dates mode: "2025-03-10,2025-03-11"
     #[serde(rename = "parentId", alias = "parent_id")]
-    pub parent_id: Option<String>, // 鐖跺緟鍔濱D锛孨one琛ㄧず鏄《绾у緟鍔?
+    pub parent_id: Option<String>, // 父待办 ID，None 表示顶级待办
     #[serde(rename = "expanded", default = "serde_aux::default_true")]
     pub expanded: bool, // 是否展开子待办
     pub completed: bool,

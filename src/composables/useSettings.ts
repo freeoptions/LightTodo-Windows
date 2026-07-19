@@ -50,16 +50,6 @@ export function useSettings() {
     }
   };
 
-  const updateBackgroundWallpaper = async (wallpaper: string | null) => {
-    try {
-      settings.value = await invoke<Settings>('update_background_wallpaper', {
-        wallpaper,
-      });
-    } catch (e) {
-      throw new Error(String(e));
-    }
-  };
-
   return {
     settings,
     loading,
@@ -68,6 +58,5 @@ export function useSettings() {
     updateShortcut,
     updatePriorityColor,
     updateAutoLaunch,
-    updateBackgroundWallpaper,
   };
 }
