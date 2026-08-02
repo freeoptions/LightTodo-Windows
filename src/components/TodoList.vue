@@ -7,6 +7,7 @@ const props = defineProps<{
   todos: TodoItemType[];
   loading?: boolean;
   isToday?: boolean;
+  viewDate?: string;
 }>();
 
 const emit = defineEmits<{
@@ -121,6 +122,7 @@ const getParentMoveTotal = (list: TodoItemType[], todo: TodoItemType) => {
             :parent-index="getParentMoveIndex(incompleteTodos, todo)"
             :parent-total="getParentMoveTotal(incompleteTodos, todo)"
             :is-today="isToday"
+            :view-date="viewDate"
             @toggle="emit('toggle', $event)"
             @delete="emit('delete', $event)"
             @edit="emit('edit', $event)"
@@ -148,6 +150,7 @@ const getParentMoveTotal = (list: TodoItemType[], todo: TodoItemType) => {
             :parent-index="getParentMoveIndex(completedTodos, todo)"
             :parent-total="getParentMoveTotal(completedTodos, todo)"
             :is-today="isToday"
+            :view-date="viewDate"
             @toggle="emit('toggle', $event)"
             @delete="emit('delete', $event)"
             @edit="emit('edit', $event)"

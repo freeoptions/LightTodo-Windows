@@ -1,5 +1,5 @@
 ﻿use chrono::Local;
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-fn is_effectively_done_for_date(todo: &TodoItem, date_to_check: &str) -> bool {
+pub fn is_effectively_done_for_date(todo: &TodoItem, date_to_check: &str) -> bool {
     if todo.completed || todo.disabled {
         return true;
     }
@@ -373,6 +373,10 @@ pub struct TodoStore {
 }
 
 impl TodoStore {
+    pub fn is_effectively_done_for_date(todo: &TodoItem, date_to_check: &str) -> bool {
+        is_effectively_done_for_date(todo, date_to_check)
+    }
+
     /// Create a new TodoStore with the specified file path
     pub fn new(config_dir: PathBuf) -> Self {
         let file_path = config_dir.join("todos.json");
@@ -509,6 +513,55 @@ impl TodoStore {
             window_start,
             window_end,
         })
+    }
+
+    pub fn is_cycle_inactive_for_date(todo: &TodoItem, date_str: &str) -> bool {
+        Self::cycle_window_for_date(todo, date_str)
+            .is_some_and(|cycle| !cycle.active)
+    }
+
+    pub fn mark_completed_for_date(todo: &mut TodoItem, date_str: &str) {
+        if let Some(cycle) = Self::cycle_window_for_date(todo, date_str) {
+            if cycle.active {
+                todo.last_reset_date = Some(cycle.window_start.format("%Y-%m-%d").to_string());
+            }
+        } else if todo.repeat_mode == "daily" || todo.repeat_mode == "weekly" {
+            todo.last_reset_date = Some(date_str.to_string());
+        }
+    }
+
+    fn completed_on_date(todo: &TodoItem, date_str: &str) -> bool {
+        if !todo.completed {
+            return false;
+        }
+
+        todo.completed_at
+            .and_then(|timestamp| Local.timestamp_opt(timestamp, 0).single())
+            .map_or(false, |date_time| {
+                date_time.date_naive().format("%Y-%m-%d").to_string() == date_str
+            })
+    }
+
+    fn reset_active_cycle_completions_for_date(todos: &mut Vec<TodoItem>, date_str: &str) -> bool {
+        let mut changed = false;
+
+        for todo in todos.iter_mut() {
+            if todo.parent_id.is_none() || todo.disabled || !todo.completed {
+                continue;
+            }
+
+            let Some(cycle) = Self::cycle_window_for_date(todo, date_str) else {
+                continue;
+            };
+
+            if cycle.active && !Self::completed_on_date(todo, date_str) {
+                todo.completed = false;
+                todo.completed_at = None;
+                changed = true;
+            }
+        }
+
+        changed
     }
 
     pub fn apply_cycle_activation_for_date(todos: &mut Vec<TodoItem>, date_str: &str) -> bool {
@@ -859,7 +912,7 @@ impl TodoStore {
                     todo.completed_at = None;
                     todo.last_reset_date = Some(Self::today());
                     true
-                } else if todo.parent_id.is_some() && parent_ids_to_reset_for_period.contains(&todo.parent_id.clone().unwrap_or_default()) {
+                } else if todo.parent_id.is_some() && todo.cycle_start_date.is_none() && parent_ids_to_reset_for_period.contains(&todo.parent_id.clone().unwrap_or_default()) {
                     // This is a subtodo whose parent needs period reset
                     eprintln!("=== [PERIOD RESET] Resetting subtodo '{}' for parent's new period", todo.content);
                     todo.completed = false;
@@ -966,7 +1019,7 @@ impl TodoStore {
                     todo.completed_at = None;
                     todo.last_reset_date = Some(Self::today());
                     true
-                } else if todo.parent_id.is_some() && parent_ids_to_reset.contains(&todo.parent_id.clone().unwrap_or_default()) {
+                } else if todo.parent_id.is_some() && todo.cycle_start_date.is_none() && parent_ids_to_reset.contains(&todo.parent_id.clone().unwrap_or_default()) {
                     // This is a subtodo whose parent needs resetting
                     // Always reset subtodos regardless of their completion status
                     eprintln!("=== [RESET] Resetting subtodo '{}' (parent_id={:?}, was_completed={}) for new cycle",
@@ -1010,7 +1063,7 @@ impl TodoStore {
 
                 // 子待办“按周几启用”的自动重置，只用于普通按日/按周循环。
                 // 对“本周内 / 本月内”父待办，完成状态应跟随周/月周期，不能每天刷回未完成。
-                if parent_repeat_mode == "weekly_this_week" || parent_repeat_mode == "monthly_this_month" {
+                if todo.cycle_start_date.is_some() || parent_repeat_mode == "weekly_this_week" || parent_repeat_mode == "monthly_this_month" {
                     continue;
                 }
 
@@ -1035,6 +1088,11 @@ impl TodoStore {
 
             if Self::apply_cycle_activation_for_date(&mut todos, today_str.as_str()) {
                 eprintln!("Saving todos after cycle subtodo activation resets...");
+                self.save(&todos)?;
+            }
+
+            if Self::reset_active_cycle_completions_for_date(&mut todos, today_str.as_str()) {
+                eprintln!("Saving todos after daily cycle subtodo resets...");
                 self.save(&todos)?;
             }
         }
@@ -1086,7 +1144,9 @@ impl TodoStore {
                     todo.repeat_mode == "daily" && todo.last_reset_date.as_ref().map_or(true, |d| d != date_to_check)
                 } else {
                     // Subtodo: check if parent is daily and parent's last_reset_date != view date
-                    if let Some(parent_id) = &todo.parent_id {
+                    if todo.cycle_start_date.is_some() {
+                        false
+                    } else if let Some(parent_id) = &todo.parent_id {
                         if let Some((parent_repeat_mode, parent_last_reset)) = parent_info.get(parent_id) {
                             // Parent is daily and last_reset_date != view date (or never reset)
                             parent_repeat_mode == "daily" && parent_last_reset.as_ref().map_or(true, |d| d != date_to_check)
@@ -1169,6 +1229,12 @@ impl TodoStore {
                 if let Some(cycle) = Self::cycle_window_for_date(todo, date_to_check) {
                     if cycle.active {
                         todo.expiry_date = Some(cycle.window_end.format("%Y-%m-%d").to_string());
+                        if !todo.disabled && todo.completed && !Self::completed_on_date(todo, date_to_check) {
+                            // Historical/future views are projections and must not mutate
+                            // the saved state, but they still need to show a new daily state as open.
+                            todo.completed = false;
+                            todo.completed_at = None;
+                        }
                     } else if !todo.disabled {
                         todo.expiry_date = None;
                         todo.inactive_by_weekday = true;
@@ -1196,21 +1262,54 @@ impl TodoStore {
         // After dynamic disabling, check if parent todos should be marked as completed
         // when all their subtodos are completed or disabled
         // First, collect parent IDs that need to be marked as completed
-        let parent_ids_to_complete: Vec<String> = sorted_todos.iter()
+        let parent_completion_states: Vec<(String, bool)> = sorted_todos.iter()
             .filter(|t| t.parent_id.is_none())
-            .filter(|parent| {
-                // Check if all subtodos are completed or disabled
-                sorted_todos.iter()
+            .filter_map(|parent| {
+                let children: Vec<&TodoItem> = sorted_todos.iter()
                     .filter(|t| t.parent_id.as_deref() == Some(&parent.id))
-                    .all(|t| is_effectively_done_for_date(t, date_to_check))
+                    .collect();
+                if children.is_empty() {
+                    return None;
+                }
+                let all_done = children.iter()
+                    .all(|todo| is_effectively_done_for_date(todo, date_to_check));
+                Some((parent.id.clone(), all_done))
             })
-            .map(|t| t.id.clone())
             .collect();
 
-        // Then, mark those parents as completed
+        // Then, project the derived parent state for the current view.
         for todo in &mut sorted_todos {
-            if parent_ids_to_complete.contains(&todo.id) {
-                todo.completed = true;
+            if let Some((_, all_done)) = parent_completion_states.iter().find(|(id, _)| id == &todo.id) {
+                todo.completed = *all_done;
+            }
+        }
+
+        // Persist only today's derived parent state. Historical views must remain read-only.
+        if is_today {
+            let completion_timestamp = Local::now().timestamp();
+            let mut parent_state_changed = false;
+            for (parent_id, all_done) in &parent_completion_states {
+                if let Some(parent) = todos.iter_mut().find(|todo| todo.id == *parent_id) {
+                    if parent.disabled {
+                        continue;
+                    }
+                    if parent.completed != *all_done {
+                        parent.completed = *all_done;
+                        parent.completed_at = if *all_done { Some(completion_timestamp) } else { None };
+                        parent_state_changed = true;
+                    } else if *all_done && parent.completed_at.is_none() {
+                        parent.completed_at = Some(completion_timestamp);
+                        parent_state_changed = true;
+                    }
+                    if *all_done && (parent.repeat_mode == "daily" || parent.repeat_mode == "weekly")
+                        && parent.last_reset_date.as_deref() != Some(today_str.as_str()) {
+                        parent.last_reset_date = Some(today_str.clone());
+                        parent_state_changed = true;
+                    }
+                }
+            }
+            if parent_state_changed {
+                self.save(&todos)?;
             }
         }
 
@@ -1245,6 +1344,111 @@ impl LongTermTodo {
 /// Store for long term todos
 pub struct LongTermTodoStore {
     file_path: PathBuf,
+}
+
+/// A one-off deadline reminder, separate from recurring todos.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeadlineReminder {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "dueDate")]
+    pub due_date: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
+}
+
+impl DeadlineReminder {
+    pub fn new(title: String, due_date: String) -> Self {
+        let now = Local::now().timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            title,
+            due_date,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+/// Store for one-off deadline reminders.
+pub struct DeadlineReminderStore {
+    file_path: PathBuf,
+}
+
+impl DeadlineReminderStore {
+    pub fn new(config_dir: PathBuf) -> Self {
+        let file_path = config_dir.join("deadline_reminders.json");
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        Self { file_path }
+    }
+
+    pub fn load(&self) -> Result<Vec<DeadlineReminder>, String> {
+        if !self.file_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read_to_string(&self.file_path)
+            .map_err(|e| format!("Failed to read deadline reminders file: {}", e))?;
+        if content.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse deadline reminders: {}", e))
+    }
+
+    pub fn save(&self, reminders: &[DeadlineReminder]) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(reminders)
+            .map_err(|e| format!("Failed to serialize deadline reminders: {}", e))?;
+        write_json_atomically(&self.file_path, &json)
+    }
+
+    pub fn add(&self, title: String, due_date: String) -> Result<DeadlineReminder, String> {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return Err("截止提醒标题不能为空".to_string());
+        }
+        NaiveDate::parse_from_str(&due_date, "%Y-%m-%d")
+            .map_err(|_| "截止日期格式无效".to_string())?;
+
+        let mut reminders = self.load()?;
+        let reminder = DeadlineReminder::new(title, due_date);
+        reminders.push(reminder.clone());
+        self.save(&reminders)?;
+        Ok(reminder)
+    }
+
+    pub fn update(&self, id: &str, title: String, due_date: String) -> Result<(), String> {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return Err("截止提醒标题不能为空".to_string());
+        }
+        NaiveDate::parse_from_str(&due_date, "%Y-%m-%d")
+            .map_err(|_| "截止日期格式无效".to_string())?;
+
+        let mut reminders = self.load()?;
+        let reminder = reminders.iter_mut()
+            .find(|reminder| reminder.id == id)
+            .ok_or_else(|| format!("Deadline reminder not found: {}", id))?;
+        reminder.title = title;
+        reminder.due_date = due_date;
+        reminder.updated_at = Local::now().timestamp();
+        self.save(&reminders)
+    }
+
+    pub fn delete(&self, id: &str) -> Result<(), String> {
+        let mut reminders = self.load()?;
+        let original_len = reminders.len();
+        reminders.retain(|reminder| reminder.id != id);
+        if reminders.len() == original_len {
+            return Err(format!("Deadline reminder not found: {}", id));
+        }
+        self.save(&reminders)
+    }
 }
 
 impl LongTermTodoStore {
@@ -1454,6 +1658,69 @@ mod tests {
         assert!(!child.completed);
         assert_eq!(child.completed_at, None);
         assert_eq!(child.last_reset_date.as_deref(), Some("2026-08-11"));
+    }
+
+    #[test]
+    fn completed_cycle_subtodo_resets_in_daily_projection() {
+        let store = todo_store_for_test("cycle_completion_projection");
+        let parent = parent_todo("parent-1");
+        let mut child = cyclic_subtodo("child-1", "parent-1");
+        child.completed = true;
+        child.completed_at = Some(1_784_035_200);
+        TodoStore::mark_completed_for_date(&mut child, "2026-07-15");
+        store.save(&[parent, child]).unwrap();
+
+        let todos = store.get_todos(Some("2026-07-15")).unwrap();
+        let child = todos.iter().find(|todo| todo.id == "child-1").unwrap();
+
+        assert!(!child.completed);
+        assert_eq!(child.completed_at, None);
+        assert_eq!(child.last_reset_date.as_deref(), Some("2026-07-14"));
+    }
+
+    #[test]
+    fn active_cycle_subtodo_resets_each_day() {
+        let store = todo_store_for_test("daily_cycle_reset");
+        let parent = parent_todo("parent-1");
+        let today = TodoStore::today();
+        let mut child = cyclic_subtodo("child-1", "parent-1");
+        child.cycle_start_date = Some(today.clone());
+        child.completed = true;
+        child.completed_at = Some(Local::now().timestamp() - 86_400);
+        child.last_reset_date = Some(today);
+        store.save(&[parent, child]).unwrap();
+
+        let todos = store.get_todos(None).unwrap();
+        let child = todos.iter().find(|todo| todo.id == "child-1").unwrap();
+
+        assert!(!child.completed);
+        assert_eq!(child.completed_at, None);
+    }
+
+    #[test]
+    fn inactive_cycle_subtodo_counts_as_effectively_done() {
+        let child = cyclic_subtodo("child-1", "parent-1");
+
+        assert!(TodoStore::is_effectively_done_for_date(&child, "2026-07-21"));
+        assert!(!TodoStore::is_effectively_done_for_date(&child, "2026-07-15"));
+    }
+
+    #[test]
+    fn deadline_reminder_store_round_trips_multiple_reminders() {
+        let dir = std::env::temp_dir().join(format!("lighttodo_deadline_test_{}", Uuid::new_v4()));
+        let store = DeadlineReminderStore::new(dir);
+
+        let first = store.add("提交材料".to_string(), "2026-08-01".to_string()).unwrap();
+        let second = store.add("续签证件".to_string(), "2026-08-07".to_string()).unwrap();
+        assert_eq!(store.load().unwrap().len(), 2);
+
+        store.update(&first.id, "提交完整材料".to_string(), "2026-08-02".to_string()).unwrap();
+        let updated = store.load().unwrap().into_iter().find(|item| item.id == first.id).unwrap();
+        assert_eq!(updated.title, "提交完整材料");
+        assert_eq!(updated.due_date, "2026-08-02");
+
+        store.delete(&second.id).unwrap();
+        assert_eq!(store.load().unwrap().len(), 1);
     }
 
     #[test]

@@ -11,6 +11,7 @@ const props = defineProps<{
   parentIndex?: number;
   parentTotal?: number;
   isToday?: boolean;
+  viewDate?: string;
   parentRepeatMode?: TodoItemType['repeatMode'];
 }>();
 
@@ -68,6 +69,7 @@ const canToggle = computed(() => {
 
 // Check if this todo is disabled
 const isInactiveByWeekday = computed(() => props.todo.inactiveByWeekday === true);
+const isCycleInactive = computed(() => isInactiveByWeekday.value && !!props.todo.cycleStartDate);
 const isDisabled = computed(() => props.todo.disabled === true || isInactiveByWeekday.value);
 
 // Can operate? (disabled todos cannot be operated on)
@@ -246,7 +248,9 @@ const todoExpiryDate = computed(() => props.todo.expiryDate || (props.todo as To
 // Check if expiry date is in the past (expired)
 const isExpired = computed(() => {
   if (!todoExpiryDate.value) return false;
-  const today = new Date();
+  const today = props.viewDate
+    ? new Date(props.viewDate + 'T00:00:00')
+    : new Date();
   today.setHours(0, 0, 0, 0);
   const expiryDate = new Date(todoExpiryDate.value + 'T00:00:00');
   return expiryDate < today;
@@ -387,9 +391,10 @@ const handleTodoItemClick = (e: Event) => {
           type="button"
           class="toggle-switch"
           :class="{ 'active': !isDisabled }"
+          :disabled="isCycleInactive"
           @click.prevent.stop="emit('toggle-disable', todo.id)"
-          :aria-label="isDisabled ? '启用' : '禁用'"
-          :title="isDisabled ? '启用这个待办' : '禁用这个待办'"
+          :aria-label="isCycleInactive ? '周期未启用' : (isDisabled ? '启用' : '禁用')"
+          :title="isCycleInactive ? '当前不在周期启用窗口' : (isDisabled ? '启用这个待办' : '禁用这个待办')"
         >
           <span class="toggle-slider"></span>
         </button>
@@ -437,6 +442,7 @@ const handleTodoItemClick = (e: Event) => {
         :parent-index="parentIndex"
         :parent-total="parentTotal"
         :is-today="isToday"
+        :view-date="viewDate"
         :parent-repeat-mode="todo.repeatMode"
         @toggle="(id) => emit('toggle', id)"
         @delete="(id) => emit('delete', id)"
@@ -478,6 +484,7 @@ const handleTodoItemClick = (e: Event) => {
             :parent-index="parentIndex"
             :parent-total="parentTotal"
             :is-today="isToday"
+            :view-date="viewDate"
             :parent-repeat-mode="todo.repeatMode"
             @toggle="(id) => emit('toggle', id)"
             @delete="(id) => emit('delete', id)"
@@ -638,8 +645,8 @@ const handleTodoItemClick = (e: Event) => {
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  background: rgba(245, 158, 11, 0.12);
-  color: #b45309;
+  background: rgba(99, 102, 241, 0.12);
+  color: #4f46e5;
   cursor: help;
   opacity: 0.95;
   transition: background 0.2s, color 0.2s, opacity 0.2s;
@@ -647,7 +654,7 @@ const handleTodoItemClick = (e: Event) => {
 
 .todo-item-expiry-icon:hover {
   opacity: 1;
-  background: rgba(245, 158, 11, 0.2);
+  background: rgba(99, 102, 241, 0.2);
 }
 
 .todo-item-expiry-icon svg {

@@ -1,6 +1,6 @@
 mod models;
 
-use models::{TodoItem, TodoStore, Settings, SettingsStore, WindowState, LongTermTodo, LongTermTodoStore};
+use models::{TodoItem, TodoStore, Settings, SettingsStore, WindowState, LongTermTodo, LongTermTodoStore, DeadlineReminder, DeadlineReminderStore};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 use tauri::image::Image;
@@ -222,20 +222,6 @@ fn hide_main_window(app: &AppHandle) {
     }
 }
 
-fn is_effectively_done_for_date(todo: &TodoItem, date_to_check: &str) -> bool {
-    if todo.completed || todo.disabled {
-        return true;
-    }
-
-    if todo.parent_id.is_some() {
-        if let Some(expiry) = &todo.expiry_date {
-            return date_to_check > expiry.as_str();
-        }
-    }
-
-    false
-}
-
 fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         match window.is_visible() {
@@ -373,13 +359,13 @@ async fn toggle_todo(handle: AppHandle, id: String, target_date: Option<String>)
         eprintln!("=== [TOGGLE_TODO] Toggled todo '{}': {} -> {}", todo.content, old_completed, todo.completed);
         if todo.completed {
             todo.completed_at = Some(Local::now().timestamp());
-            if todo.repeat_mode == "daily" || todo.repeat_mode == "weekly" {
-                todo.last_reset_date = Some(TodoStore::today());
-            }
+            TodoStore::mark_completed_for_date(todo, date_to_check);
         } else {
-            // 取消完成时，清除 last_reset_date，避免触发自动重置
+            // 周期子待办保留当前窗口标记，避免刷新时被误判为进入新周期。
             todo.completed_at = None;
-            todo.last_reset_date = None;
+            if todo.cycle_start_date.is_none() {
+                todo.last_reset_date = None;
+            }
         }
         !old_completed // true if marking as completed, false if unmarking
     } else {
@@ -399,9 +385,7 @@ async fn toggle_todo(handle: AppHandle, id: String, target_date: Option<String>)
             if todo.parent_id.as_deref() == Some(id.as_str()) {
                 todo.completed = true;
                 todo.completed_at = Some(Local::now().timestamp());
-                if todo.repeat_mode == "daily" || todo.repeat_mode == "weekly" {
-                    todo.last_reset_date = Some(TodoStore::today());
-                }
+                TodoStore::mark_completed_for_date(todo, date_to_check);
             }
         }
     } else if is_parent && !is_completed {
@@ -433,7 +417,7 @@ async fn toggle_todo(handle: AppHandle, id: String, target_date: Option<String>)
         // Check if all subtodos are completed OR disabled
         let all_siblings_done = todos.iter()
             .filter(|t| t.parent_id.as_deref() == Some(&pid))
-            .all(|t| is_effectively_done_for_date(t, date_to_check));
+            .all(|t| TodoStore::is_effectively_done_for_date(t, date_to_check));
 
         eprintln!("  all_siblings_done = {}", all_siblings_done);
 
@@ -443,7 +427,7 @@ async fn toggle_todo(handle: AppHandle, id: String, target_date: Option<String>)
             // IMPORTANT: Always update parent's last_reset_date when a subtodo is completed
             // This ensures that partially completed subtodos don't get reset when switching views
             if is_completed && (parent_todo.repeat_mode == "daily" || parent_todo.repeat_mode == "weekly") {
-                parent_todo.last_reset_date = Some(TodoStore::today());
+                parent_todo.last_reset_date = Some(date_to_check.to_string());
                 eprintln!("  -> Updated parent's last_reset_date to today because a subtodo was completed");
             }
 
@@ -451,6 +435,7 @@ async fn toggle_todo(handle: AppHandle, id: String, target_date: Option<String>)
                 // All subtodos completed or disabled, mark parent as completed
                 parent_todo.completed = true;
                 parent_todo.completed_at = Some(Local::now().timestamp());
+                TodoStore::mark_completed_for_date(parent_todo, date_to_check);
                 eprintln!("  -> All subtodos completed/disabled, marking parent as completed");
             } else {
                 // Not all subtodos are done, mark parent as uncompleted
@@ -562,7 +547,15 @@ async fn edit_todo(handle: AppHandle, id: String, content: String, repeat_mode: 
         todo.content = content;
         todo.repeat_mode = repeat_mode.clone();
         todo.weekdays = if repeat_mode == "weekly" { weekdays } else { None };
-        todo.active_weekdays = if is_subtodo { active_weekdays } else { None };
+        if is_subtodo {
+            // The current editor does not expose weekday activation yet; preserve it
+            // when the payload omits the field instead of silently clearing it.
+            if active_weekdays.is_some() {
+                todo.active_weekdays = active_weekdays;
+            }
+        } else {
+            todo.active_weekdays = None;
+        }
         todo.specific_dates = if repeat_mode == "specific_dates" { specific_dates } else { None };
         // Allow expiry_date for daily/weekly repeat modes OR for subtodos
         todo.expiry_date = if repeat_mode == "daily" || repeat_mode == "weekly" || is_subtodo { expiry_date } else { None };
@@ -820,13 +813,15 @@ async fn move_todo_down(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
 
 /// Complete all subtodos of a parent todo (with user confirmation)
 #[tauri::command]
-async fn complete_all_subtodos(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, String> {
+async fn complete_all_subtodos(handle: AppHandle, id: String, target_date: Option<String>) -> Result<Vec<TodoItem>, String> {
     use chrono::Local;
 
     let data_dir = get_data_dir(&handle);
     let store = TodoStore::new(data_dir);
 
     let mut todos = store.load()?;
+    let today = TodoStore::today();
+    let date_to_check = target_date.as_deref().unwrap_or(&today);
 
     // First, mark all subtodos as completed
     let parent_id = id.clone();
@@ -834,9 +829,7 @@ async fn complete_all_subtodos(handle: AppHandle, id: String) -> Result<Vec<Todo
         if todo.parent_id.as_ref() == Some(&parent_id) {
             todo.completed = true;
             todo.completed_at = Some(Local::now().timestamp());
-            if todo.repeat_mode == "daily" || todo.repeat_mode == "weekly" {
-                todo.last_reset_date = Some(TodoStore::today());
-            }
+            TodoStore::mark_completed_for_date(todo, date_to_check);
             eprintln!("Marked subtodo '{}' as completed", todo.content);
         }
     }
@@ -845,21 +838,19 @@ async fn complete_all_subtodos(handle: AppHandle, id: String) -> Result<Vec<Todo
     if let Some(parent_todo) = todos.iter_mut().find(|t| t.id == id) {
         parent_todo.completed = true;
         parent_todo.completed_at = Some(Local::now().timestamp());
-        if parent_todo.repeat_mode == "daily" || parent_todo.repeat_mode == "weekly" {
-            parent_todo.last_reset_date = Some(TodoStore::today());
-        }
+        TodoStore::mark_completed_for_date(parent_todo, date_to_check);
         eprintln!("Marked parent '{}' as completed", parent_todo.content);
     }
 
     store.save(&todos)?;
-    store.get_todos(None)
+    store.get_todos(Some(date_to_check))
 }
 
 /// Toggle disable status of a todo
 /// When disabled, the todo is marked as completed and cannot be operated on
 /// When enabled (undisabled), the todo can be operated on normally
 #[tauri::command]
-async fn toggle_disable(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, String> {
+async fn toggle_disable(handle: AppHandle, id: String, target_date: Option<String>) -> Result<Vec<TodoItem>, String> {
     use chrono::Local;
 
     let data_dir = get_data_dir(&handle);
@@ -867,12 +858,18 @@ async fn toggle_disable(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
 
     let mut todos = store.load()?;
     let today = TodoStore::today();
+    let date_to_check = target_date.as_deref().unwrap_or(&today);
 
     // Find the todo and toggle its disabled status
     let is_disabling = if let Some(todo) = todos.iter_mut().find(|t| t.id == id) {
+        if !todo.disabled && TodoStore::is_cycle_inactive_for_date(todo, date_to_check) {
+            // An inactive cycle window is a runtime projection, not a manual disable.
+            // Do not turn a temporary inactive state into a persisted disabled flag.
+            return store.get_todos(Some(date_to_check));
+        }
         let auto_disabled_by_expiry = todo.parent_id.is_some()
             && !todo.disabled
-            && todo.expiry_date.as_ref().is_some_and(|expiry| today.as_str() > expiry.as_str());
+            && todo.expiry_date.as_ref().is_some_and(|expiry| date_to_check > expiry.as_str());
         let was_effectively_disabled = todo.disabled || auto_disabled_by_expiry;
         let is_disabling = !was_effectively_disabled;
         let todo_type = if todo.parent_id.is_some() { "subtodo" } else { "parent todo" };
@@ -882,9 +879,7 @@ async fn toggle_disable(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
             todo.disabled = true;
             todo.completed = true;
             todo.completed_at = Some(Local::now().timestamp());
-            if todo.repeat_mode == "daily" || todo.repeat_mode == "weekly" {
-                todo.last_reset_date = Some(TodoStore::today());
-            }
+            TodoStore::mark_completed_for_date(todo, date_to_check);
             eprintln!("Disabled {} '{}', marked as completed", todo_type, todo.content);
         } else {
             // When enabling, mark as uncompleted
@@ -927,7 +922,7 @@ async fn toggle_disable(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
                 }
             } else {
                 // Enable subtodo and mark as uncompleted
-                let auto_disabled_by_expiry = subtodo.expiry_date.as_ref().is_some_and(|expiry| today.as_str() > expiry.as_str());
+                let auto_disabled_by_expiry = subtodo.expiry_date.as_ref().is_some_and(|expiry| date_to_check > expiry.as_str());
                 if subtodo.disabled || auto_disabled_by_expiry {
                     subtodo.disabled = false;
                     subtodo.completed = false;
@@ -951,16 +946,14 @@ async fn toggle_disable(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
         // Check if all subtodos are completed OR disabled
         let all_siblings_done = todos.iter()
             .filter(|t| t.parent_id.as_deref() == Some(&parent_id))
-            .all(|t| is_effectively_done_for_date(t, &today));
+            .all(|t| TodoStore::is_effectively_done_for_date(t, date_to_check));
 
         if let Some(parent_todo) = todos.iter_mut().find(|t| t.id == parent_id) {
             if all_siblings_done {
                 // All subtodos are completed or disabled, mark parent as completed
                 parent_todo.completed = true;
                 parent_todo.completed_at = Some(Local::now().timestamp());
-                if parent_todo.repeat_mode == "daily" || parent_todo.repeat_mode == "weekly" {
-                    parent_todo.last_reset_date = Some(TodoStore::today());
-                }
+                TodoStore::mark_completed_for_date(parent_todo, date_to_check);
                 eprintln!("All subtodos completed/disabled, marking parent '{}' as completed", parent_todo.content);
             } else {
                 // Not all subtodos are done, mark parent as uncompleted
@@ -974,7 +967,7 @@ async fn toggle_disable(handle: AppHandle, id: String) -> Result<Vec<TodoItem>, 
     }
 
     store.save(&todos)?;
-    store.get_todos(None)
+    store.get_todos(Some(date_to_check))
 }
 
 /// Get current settings
@@ -1125,6 +1118,43 @@ fn move_long_term_todo_up(store: State<'_, LongTermTodoStore>, id: String) -> Re
 #[tauri::command]
 fn move_long_term_todo_down(store: State<'_, LongTermTodoStore>, id: String) -> Result<Vec<LongTermTodo>, String> {
     store.move_down(&id)?;
+    store.load()
+}
+
+// ============ Deadline Reminder Commands ============
+
+#[tauri::command]
+fn get_deadline_reminders(store: State<'_, DeadlineReminderStore>) -> Result<Vec<DeadlineReminder>, String> {
+    store.load()
+}
+
+#[tauri::command]
+fn add_deadline_reminder(
+    store: State<'_, DeadlineReminderStore>,
+    title: String,
+    due_date: String,
+) -> Result<Vec<DeadlineReminder>, String> {
+    store.add(title, due_date)?;
+    store.load()
+}
+
+#[tauri::command]
+fn update_deadline_reminder(
+    store: State<'_, DeadlineReminderStore>,
+    id: String,
+    title: String,
+    due_date: String,
+) -> Result<Vec<DeadlineReminder>, String> {
+    store.update(&id, title, due_date)?;
+    store.load()
+}
+
+#[tauri::command]
+fn delete_deadline_reminder(
+    store: State<'_, DeadlineReminderStore>,
+    id: String,
+) -> Result<Vec<DeadlineReminder>, String> {
+    store.delete(&id)?;
     store.load()
 }
 
@@ -1536,6 +1566,10 @@ pub fn run() {
             let long_term_todo_store = LongTermTodoStore::new(data_dir.clone());
             app.manage(long_term_todo_store);
 
+            // Create and manage one-off deadline reminder store
+            let deadline_reminder_store = DeadlineReminderStore::new(data_dir.clone());
+            app.manage(deadline_reminder_store);
+
             eprintln!("Settings loaded: shortcuts={:?}", settings.shortcuts);
 
             // Initialize global shortcuts plugin with Builder pattern
@@ -1732,33 +1766,27 @@ pub fn run() {
             move_long_term_todo_up,
             move_long_term_todo_down,
             update_long_term_todo,
+            get_deadline_reminders,
+            add_deadline_reminder,
+            update_deadline_reminder,
+            delete_deadline_reminder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::image::Image;
-
     let show_item = MenuItem::with_id(app, "show", "显示软件", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
-    // Try to load icon.ico first (Windows preferred), then fallback to PNG
-    let icon_result = app.path().resource_dir()?
-        .join("icons").join("icon.ico")
-        .canonicalize();
-
-    let icon = if let Ok(icon_path) = icon_result {
-        if let Ok(bytes) = std::fs::read(&icon_path) {
-            Image::new_owned(bytes, 32, 32)
-        } else {
-            // Fallback to create a simple colored icon
-            create_simple_icon()
-        }
-    } else {
-        create_simple_icon()
-    };
+    // Reuse Tauri's decoded default window icon so the tray, window and taskbar
+    // always display the exact same asset. The fallback only applies if the
+    // application context does not provide an icon.
+    let icon = app
+        .default_window_icon()
+        .map(|icon| Image::new_owned(icon.rgba().to_vec(), icon.width(), icon.height()))
+        .unwrap_or_else(create_simple_icon);
 
     // Build tray icon with menu
     let _tray = TrayIconBuilder::new()

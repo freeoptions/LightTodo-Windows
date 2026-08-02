@@ -167,7 +167,10 @@ export function useTodos() {
     error.value = null;
 
     try {
-      await invoke<TodoItem[]>('complete_all_subtodos', { id });
+      await invoke<TodoItem[]>('complete_all_subtodos', {
+        id,
+        targetDate: currentViewDate.value || null
+      });
       // Reload with current view date instead of using returned list
       const flatTodos = await invoke<TodoItem[]>('get_todos', {
         targetDate: currentViewDate.value || null
@@ -187,7 +190,10 @@ export function useTodos() {
     // Don't show loading state to avoid page jump
     error.value = null;
     try {
-      await invoke<TodoItem[]>('toggle_disable', { id });
+      await invoke<TodoItem[]>('toggle_disable', {
+        id,
+        targetDate: currentViewDate.value || null
+      });
       // Reload with current view date instead of using returned list
       const flatTodos = await invoke<TodoItem[]>('get_todos', {
         targetDate: currentViewDate.value || null

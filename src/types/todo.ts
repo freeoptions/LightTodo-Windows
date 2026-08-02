@@ -52,3 +52,12 @@ export interface LongTermTodo {
   createdAt: number;
   completedAt?: number;
 }
+
+/** One-off reminders with a single deadline, independent from recurring todos. */
+export interface DeadlineReminder {
+  id: string;
+  title: string;
+  dueDate: string;
+  createdAt: number;
+  updatedAt: number;
+}

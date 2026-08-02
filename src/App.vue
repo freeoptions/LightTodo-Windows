@@ -4,6 +4,7 @@ import TodoList from './components/TodoList.vue';
 import Settings from './components/Settings.vue';
 import DatePicker from './components/DatePicker.vue';
 import LongTermTodos from './components/LongTermTodos.vue';
+import DeadlineReminders from './components/DeadlineReminders.vue';
 import { useTodos } from './composables/useTodos';
 import { type RepeatMode, type TodoItem as TodoItemType } from './types/todo';
 import { invoke } from '@tauri-apps/api/core';
@@ -64,6 +65,7 @@ const editingSubtodo = ref(false); // true if editing a subtodo (not parent)
 const modalSubtodos = ref<Array<{
   id: string;
   content: string;
+  activeWeekdays?: string;
   expiryDate?: string;
   cycleStartDate?: string;
   cycleActiveDays?: number;
@@ -449,6 +451,7 @@ const openEditModal = async (id: string) => {
       modalSubtodos.value = todo.subtodos.map(st => ({
         id: st.id,
         content: st.content,
+        activeWeekdays: st.activeWeekdays,
         expiryDate: st.expiryDate,
         cycleStartDate: st.cycleStartDate,
         cycleActiveDays: st.cycleActiveDays,
@@ -695,6 +698,9 @@ const submitAddTodo = async () => {
         content: newTodoContent.value.trim(),
         repeatMode: newTodoRepeatMode.value,
         weekdays: weekdaysStr,
+        activeWeekdays: editingSubtodo.value
+          ? findTodoInTree(todos.value, editingTodoId.value)?.activeWeekdays || null
+          : null,
         specificDates: specificDatesStr,
         expiryDate: editingSubtodo.value ? subtodoExpiryDate : null,
         cycleStartDate: editingSubtodo.value ? subtodoCyclePayload.cycleStartDate : null,
@@ -710,12 +716,7 @@ const submitAddTodo = async () => {
         });
         const existingSubtodos = currentTodos.filter(t => t.parentId === editingTodoId.value);
 
-        // Delete all existing subtodos
-        for (const subtodo of existingSubtodos) {
-          await invoke('delete_todo', { id: subtodo.id });
-        }
-
-        // Add all subtodos from modal (skip empty ones)
+        // Add any inline subtodo first (skip empty input).
         if (newSubtodoContent.value.trim()) {
           modalSubtodos.value.push({
             id: Date.now().toString(),
@@ -724,9 +725,29 @@ const submitAddTodo = async () => {
           newSubtodoContent.value = '';
         }
 
+        // Update existing subtodos in place so IDs, completion, disabled state,
+        // cycle markers and other persisted state survive parent edits.
+        const existingSubtodoIds = new Set(existingSubtodos.map(subtodo => subtodo.id));
+        const retainedSubtodoIds = new Set<string>();
         for (const subtodo of modalSubtodos.value) {
           const content = subtodo.content.trim();
-          if (content) {
+          if (!content) continue;
+
+          if (existingSubtodoIds.has(subtodo.id)) {
+            retainedSubtodoIds.add(subtodo.id);
+            await invoke('edit_todo', {
+              id: subtodo.id,
+              content,
+              repeatMode: 'none',
+              weekdays: null,
+              activeWeekdays: subtodo.activeWeekdays || null,
+              specificDates: null,
+              expiryDate: subtodo.expiryDate || null,
+              cycleStartDate: subtodo.cycleStartDate || null,
+              cycleActiveDays: subtodo.cycleActiveDays || null,
+              cycleIntervalWeeks: subtodo.cycleIntervalWeeks || null,
+            });
+          } else {
             await invoke('add_todo', {
               content: content,
               repeatMode: 'none',
@@ -737,6 +758,13 @@ const submitAddTodo = async () => {
               cycleActiveDays: subtodo.cycleActiveDays || null,
               cycleIntervalWeeks: subtodo.cycleIntervalWeeks || null,
             });
+          }
+        }
+
+        // Delete only subtodos explicitly removed from the modal.
+        for (const subtodo of existingSubtodos) {
+          if (!retainedSubtodoIds.has(subtodo.id)) {
+            await invoke('delete_todo', { id: subtodo.id });
           }
         }
       }
@@ -1006,10 +1034,13 @@ const goToToday = async () => {
           <div v-if="isSavingMemo" class="memo-saving">保存中...</div>
         </div>
 
+        <DeadlineReminders />
+
         <TodoList
           :todos="todos"
           :loading="loading"
           :is-today="isViewingToday"
+          :view-date="viewDate"
           @toggle="toggleTodo"
           @delete="openDeleteConfirm"
           @edit="openEditModal"
