@@ -268,7 +268,7 @@ async fn get_todos(handle: AppHandle, target_date: Option<String>) -> Result<Vec
 
 /// Add a new todo
 #[tauri::command]
-async fn add_todo(handle: AppHandle, content: String, repeat_mode: String, weekdays: Option<String>, active_weekdays: Option<String>, specific_dates: Option<String>, parent_id: Option<String>, completed: Option<bool>, disabled: Option<bool>, expiry_date: Option<String>, priority: Option<u8>, cycle_start_date: Option<String>, cycle_active_days: Option<u32>, cycle_interval_weeks: Option<u32>) -> Result<Vec<TodoItem>, String> {
+async fn add_todo(handle: AppHandle, content: String, repeat_mode: String, weekdays: Option<String>, active_weekdays: Option<String>, specific_dates: Option<String>, parent_id: Option<String>, completed: Option<bool>, disabled: Option<bool>, expiry_date: Option<String>, priority: Option<u8>, cycle_start_date: Option<String>, cycle_active_days: Option<u32>, cycle_interval_weeks: Option<u32>, cycle_completion_mode: Option<String>) -> Result<Vec<TodoItem>, String> {
     let data_dir = get_data_dir(&handle);
     let store = TodoStore::new(data_dir);
 
@@ -300,6 +300,10 @@ async fn add_todo(handle: AppHandle, content: String, repeat_mode: String, weekd
         new_todo.cycle_start_date = cycle_start_date;
         new_todo.cycle_active_days = cycle_active_days;
         new_todo.cycle_interval_weeks = cycle_interval_weeks;
+        new_todo.cycle_completion_mode = match cycle_completion_mode.as_deref() {
+            Some("once") => "once".to_string(),
+            _ => "daily".to_string(),
+        };
     }
     // Set priority if provided
     if let Some(p) = priority {
@@ -532,7 +536,7 @@ fn delete_subtree_recursive(todos: &mut Vec<TodoItem>, parent_id: &str) {
 
 /// Edit a todo
 #[tauri::command]
-async fn edit_todo(handle: AppHandle, id: String, content: String, repeat_mode: String, weekdays: Option<String>, active_weekdays: Option<String>, specific_dates: Option<String>, expiry_date: Option<String>, priority: Option<u8>, cycle_start_date: Option<String>, cycle_active_days: Option<u32>, cycle_interval_weeks: Option<u32>) -> Result<Vec<TodoItem>, String> {
+async fn edit_todo(handle: AppHandle, id: String, content: String, repeat_mode: String, weekdays: Option<String>, active_weekdays: Option<String>, specific_dates: Option<String>, expiry_date: Option<String>, priority: Option<u8>, cycle_start_date: Option<String>, cycle_active_days: Option<u32>, cycle_interval_weeks: Option<u32>, cycle_completion_mode: Option<String>) -> Result<Vec<TodoItem>, String> {
     let data_dir = get_data_dir(&handle);
     let store = TodoStore::new(data_dir);
 
@@ -562,6 +566,14 @@ async fn edit_todo(handle: AppHandle, id: String, content: String, repeat_mode: 
         todo.cycle_start_date = if is_subtodo { cycle_start_date } else { None };
         todo.cycle_active_days = if is_subtodo { cycle_active_days } else { None };
         todo.cycle_interval_weeks = if is_subtodo { cycle_interval_weeks } else { None };
+        todo.cycle_completion_mode = if is_subtodo {
+            match cycle_completion_mode.as_deref() {
+                Some("once") => "once".to_string(),
+                _ => "daily".to_string(),
+            }
+        } else {
+            "daily".to_string()
+        };
         // Set priority (only for parent todos)
         todo.priority = if is_subtodo { None } else { priority };
 
@@ -1071,6 +1083,38 @@ fn save_window_state(
     Ok(())
 }
 
+/// Persist the user-selected window geometry using the same size semantics as
+/// `set_size`: the content area, not the native frame around it.
+fn save_window_geometry(window: &tauri::WebviewWindow, store: &SettingsStore) {
+    let position = window.outer_position();
+    let size = window.inner_size();
+
+    if let (Ok(pos), Ok(sz)) = (position, size) {
+        let mut settings = store.load().unwrap_or_default();
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let logical_pos: tauri::LogicalPosition<f64> = pos.to_logical(scale);
+        let logical_size: tauri::LogicalSize<f64> = sz.to_logical(scale);
+
+        settings.window.x = logical_pos.x.round() as i32;
+        settings.window.y = logical_pos.y.round() as i32;
+        settings.window.width = logical_size.width.round() as u32;
+        settings.window.height = logical_size.height.round() as u32;
+
+        if let Err(error) = store.save(&settings) {
+            eprintln!("Failed to save window geometry: {}", error);
+        } else {
+            eprintln!(
+                "Window geometry saved: x={}, y={}, w={}, h={} (scale={})",
+                settings.window.x,
+                settings.window.y,
+                settings.window.width,
+                settings.window.height,
+                scale
+            );
+        }
+    }
+}
+
 // ============ Long Term Todo Commands ============
 
 /// Get all long term todos
@@ -1504,7 +1548,14 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::new().build())
+        // Window geometry is persisted in the portable settings.json by our own
+        // save/restore flow. Do not let the plugin restore a second, stale size
+        // over the user's latest manually resized dimensions.
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .skip_initial_state("main")
+                .build(),
+        )
         .setup(|app| {
             eprintln!("=== LightTodo Starting ===");
 
@@ -1694,38 +1745,12 @@ pub fn run() {
                 let store = settings_store.clone();
                 let window_visible_for_close = window_visible.clone();
 
-                // Temporarily disable window state restoration
-                eprintln!("Window state restoration disabled for debugging");
-
-                // Spawn a task to save window state when closing
+                // Save the latest user-selected geometry before hiding the window.
                 window_clone.on_window_event(move |event| {
                     match event {
                         tauri::WindowEvent::CloseRequested { api, .. } => {
-                            // Save window state to settings.json before hiding
                             eprintln!("Saving window state before close...");
-
-                            // Get window info
-                            let position = window_clone2.outer_position();
-                            let size = window_clone2.outer_size();
-
-                            if let (Ok(pos), Ok(sz)) = (position, size) {
-                                let mut settings = store.load().unwrap_or_default();
-
-                                // Get scale factor and convert physical to logical coordinates
-                                let scale = window_clone2.scale_factor().unwrap_or(1.0);
-                                let logical_pos: tauri::LogicalPosition<f64> = pos.to_logical(scale);
-                                let logical_size: tauri::LogicalSize<f64> = sz.to_logical(scale);
-
-                                // Round to nearest integer to avoid precision issues
-                                settings.window.x = logical_pos.x.round() as i32;
-                                settings.window.y = logical_pos.y.round() as i32;
-                                settings.window.width = logical_size.width.round() as u32;
-                                settings.window.height = logical_size.height.round() as u32;
-
-                                let _ = store.save(&settings);
-                                eprintln!("Window state saved: x={}, y={}, w={}, h={} (scale={})",
-                                    settings.window.x, settings.window.y, settings.window.width, settings.window.height, scale);
-                            }
+                            save_window_geometry(&window_clone2, &store);
 
                             api.prevent_close();
                             let _ = window_clone2.hide();
@@ -1810,6 +1835,11 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     show_main_window(app);
                 }
                 "quit" => {
+                    // `app.exit()` can bypass the main window's close event,
+                    // so flush the latest geometry explicitly before exiting.
+                    if let Some(window) = app.get_webview_window("main") {
+                        save_window_geometry(&window, app.state::<SettingsStore>().inner());
+                    }
                     app.exit(0);
                 }
                 _ => {}

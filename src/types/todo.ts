@@ -20,12 +20,15 @@ export interface TodoItem {
   cycleStartDate?: string; // YYYY-MM-DD，仅用于子待办周期启用
   cycleActiveDays?: number; // 启用天数，包含开始日
   cycleIntervalWeeks?: number; // 间隔周数，例如 4 表示每 4 周启用一轮
+  cycleCompletionMode?: CycleCompletionMode; // 周期内完成规则，旧数据缺失时按每天重置处理
   priority?: 1 | 2 | 3; // 优先级，只对父待办有效
   order?: number; // 排序字段，用于手动调整待办顺序
   weekStart?: string; // YYYY-MM-DD 格式，记录周待办所属周的周一，仅用于 weekly_this_week 模式
   monthStart?: string; // YYYY-MM-DD 格式，记录月待办所属月的第一天，仅用于 monthly_this_month 模式
   subtodos?: TodoItem[]; // 子待办列表（运行时构建，不存储在后端）
 }
+
+export type CycleCompletionMode = 'daily' | 'once';
 
 /**
  * Repeat mode options for the UI

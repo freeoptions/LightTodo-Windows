@@ -6,7 +6,7 @@ import DatePicker from './components/DatePicker.vue';
 import LongTermTodos from './components/LongTermTodos.vue';
 import DeadlineReminders from './components/DeadlineReminders.vue';
 import { useTodos } from './composables/useTodos';
-import { type RepeatMode, type TodoItem as TodoItemType } from './types/todo';
+import { type CycleCompletionMode, type RepeatMode, type TodoItem as TodoItemType } from './types/todo';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { Settings as SettingsType } from './types/settings';
@@ -40,6 +40,7 @@ const newSubtodoExpiryDate = ref('');
 const newSubtodoCycleStartDate = ref('');
 const newSubtodoCycleActiveDays = ref(7);
 const newSubtodoCycleIntervalWeeks = ref(4);
+const newSubtodoCycleCompletionMode = ref<CycleCompletionMode>('daily');
 const subtodoValidationMessage = ref('');
 const weekdayOptions = [
   { value: 1, label: '周一' },
@@ -70,6 +71,7 @@ const modalSubtodos = ref<Array<{
   cycleStartDate?: string;
   cycleActiveDays?: number;
   cycleIntervalWeeks?: number;
+  cycleCompletionMode?: CycleCompletionMode;
 }>>([]);
 const newSubtodoContent = ref('');
 
@@ -283,7 +285,10 @@ const saveCurrentWindowState = async () => {
   try {
     const [position, size, scaleFactor] = await Promise.all([
       currentWindow.outerPosition(),
-      currentWindow.outerSize(),
+      // Persist the webview/content size. `outerSize()` includes the native
+      // window frame, so restoring it as a logical window size made the
+      // reopened window a few pixels wider than the user's saved minimum.
+      currentWindow.innerSize(),
       currentWindow.scaleFactor(),
     ]);
 
@@ -343,6 +348,7 @@ const resetSubtodoCycleForm = () => {
   newSubtodoCycleStartDate.value = '';
   newSubtodoCycleActiveDays.value = 7;
   newSubtodoCycleIntervalWeeks.value = 4;
+  newSubtodoCycleCompletionMode.value = 'daily';
   subtodoValidationMessage.value = '';
 };
 
@@ -352,6 +358,7 @@ const getSubtodoCyclePayload = () => {
       cycleStartDate: null,
       cycleActiveDays: null,
       cycleIntervalWeeks: null,
+      cycleCompletionMode: null,
     };
   }
 
@@ -362,6 +369,7 @@ const getSubtodoCyclePayload = () => {
     cycleStartDate: newSubtodoCycleStartDate.value,
     cycleActiveDays: activeDays,
     cycleIntervalWeeks: intervalWeeks,
+    cycleCompletionMode: newSubtodoCycleCompletionMode.value,
   };
 };
 
@@ -439,6 +447,7 @@ const openEditModal = async (id: string) => {
       newSubtodoCycleStartDate.value = todo.cycleStartDate;
       newSubtodoCycleActiveDays.value = todo.cycleActiveDays || 7;
       newSubtodoCycleIntervalWeeks.value = todo.cycleIntervalWeeks || 4;
+      newSubtodoCycleCompletionMode.value = todo.cycleCompletionMode || 'daily';
     } else {
       resetSubtodoCycleForm();
       if (isSubtodo) {
@@ -456,6 +465,7 @@ const openEditModal = async (id: string) => {
         cycleStartDate: st.cycleStartDate,
         cycleActiveDays: st.cycleActiveDays,
         cycleIntervalWeeks: st.cycleIntervalWeeks,
+        cycleCompletionMode: st.cycleCompletionMode,
       }));
       console.log('=== [EDIT] Loaded subtodos:', modalSubtodos.value.length);
     } else {
@@ -706,6 +716,7 @@ const submitAddTodo = async () => {
         cycleStartDate: editingSubtodo.value ? subtodoCyclePayload.cycleStartDate : null,
         cycleActiveDays: editingSubtodo.value ? subtodoCyclePayload.cycleActiveDays : null,
         cycleIntervalWeeks: editingSubtodo.value ? subtodoCyclePayload.cycleIntervalWeeks : null,
+        cycleCompletionMode: editingSubtodo.value ? subtodoCyclePayload.cycleCompletionMode : null,
       });
 
       // If editing a parent todo, handle subtodos
@@ -746,6 +757,7 @@ const submitAddTodo = async () => {
               cycleStartDate: subtodo.cycleStartDate || null,
               cycleActiveDays: subtodo.cycleActiveDays || null,
               cycleIntervalWeeks: subtodo.cycleIntervalWeeks || null,
+              cycleCompletionMode: subtodo.cycleStartDate ? (subtodo.cycleCompletionMode || 'daily') : null,
             });
           } else {
             await invoke('add_todo', {
@@ -757,6 +769,7 @@ const submitAddTodo = async () => {
               cycleStartDate: subtodo.cycleStartDate || null,
               cycleActiveDays: subtodo.cycleActiveDays || null,
               cycleIntervalWeeks: subtodo.cycleIntervalWeeks || null,
+              cycleCompletionMode: subtodo.cycleStartDate ? (subtodo.cycleCompletionMode || 'daily') : null,
             });
           }
         }
@@ -786,6 +799,7 @@ const submitAddTodo = async () => {
         cycleStartDate: subtodoCyclePayload.cycleStartDate,
         cycleActiveDays: subtodoCyclePayload.cycleActiveDays,
         cycleIntervalWeeks: subtodoCyclePayload.cycleIntervalWeeks,
+        cycleCompletionMode: subtodoCyclePayload.cycleCompletionMode,
       });
       const flatTodos = await invoke<TodoItemType[]>('get_todos', {
         targetDate: viewDate.value || null
@@ -848,6 +862,7 @@ const submitAddTodo = async () => {
               cycleStartDate: subtodo.cycleStartDate || null,
               cycleActiveDays: subtodo.cycleActiveDays || null,
               cycleIntervalWeeks: subtodo.cycleIntervalWeeks || null,
+              cycleCompletionMode: subtodo.cycleStartDate ? (subtodo.cycleCompletionMode || 'daily') : null,
             });
             console.log("=== [ADD] Subtodo saved successfully");
           } else {
@@ -1235,6 +1250,25 @@ const goToToday = async () => {
                   max="52"
                 />
               </label>
+              <div class="cycle-completion-field">
+                <span class="cycle-config-label">完成规则</span>
+                <div class="cycle-completion-options">
+                  <label
+                    class="cycle-completion-option"
+                    :class="{ active: newSubtodoCycleCompletionMode === 'daily' }"
+                  >
+                    <input v-model="newSubtodoCycleCompletionMode" type="radio" value="daily" />
+                    <span>每天重置</span>
+                  </label>
+                  <label
+                    class="cycle-completion-option"
+                    :class="{ active: newSubtodoCycleCompletionMode === 'once' }"
+                  >
+                    <input v-model="newSubtodoCycleCompletionMode" type="radio" value="once" />
+                    <span>周期内完成一次</span>
+                  </label>
+                </div>
+              </div>
               <span class="form-hint">启用期包含开始日；例如 2026-07-14 启用 7 天，就是启用到 2026-07-20，每 4 周再次启用。</span>
               <span v-if="!newSubtodoCycleStartDate" class="form-hint warning">开启周期启用后，请选择首轮启用日期</span>
             </div>
@@ -1389,29 +1423,29 @@ body:hover::-webkit-scrollbar-thumb {
 .app {
   max-width: 640px;
   margin: 0 auto;
-  padding: 26px 18px;
+  padding: 8px 18px 26px;
 }
 
 .app-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   margin-bottom: 16px;
-  gap: 10px;
+  gap: 12px;
 }
 
 .header-content {
-  flex: 1;
+  width: 100%;
   min-width: 0;
 }
 
 .date-info {
+  --date-display-size: clamp(20px, 5.3vw, 24px);
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  align-items: flex-start;
-  min-height: 80px;
-  justify-content: center;
+  align-items: baseline;
+  gap: 10px;
+  min-height: 0;
+  justify-content: flex-start;
 }
 
 .date-main {
@@ -1428,18 +1462,22 @@ body:hover::-webkit-scrollbar-thumb {
 }
 
 .lunar-zodiac {
-  font-size: 14px;
+  font-size: var(--date-display-size);
   color: var(--primary-color);
   font-weight: 700;
+  line-height: 1.1;
 }
 
 .lunar-date {
-  font-size: 14px;
+  font-size: var(--date-display-size);
   color: var(--text-secondary);
+  line-height: 1.1;
+  white-space: nowrap;
 }
 
 .back-today-btn {
-  margin-top: 2px;
+  margin-top: 0;
+  margin-left: auto;
   padding: 6px 12px;
   border: none;
   border-radius: 6px;
@@ -1461,7 +1499,7 @@ body:hover::-webkit-scrollbar-thumb {
 }
 
 .date-text {
-  font-size: 24px;
+  font-size: var(--date-display-size);
   font-weight: 800;
   color: var(--text-primary);
   letter-spacing: 0;
@@ -1471,18 +1509,18 @@ body:hover::-webkit-scrollbar-thumb {
 }
 
 .weekday-text {
-  font-size: 14px;
+  font-size: var(--date-display-size);
   color: var(--text-secondary);
   font-weight: 700;
+  line-height: 1.1;
   white-space: nowrap;
 }
 
 .header-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(72px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
-  width: 164px;
-  flex: 0 0 164px;
+  width: 100%;
 }
 
 .parent-tabs {
@@ -2312,6 +2350,54 @@ body:hover::-webkit-scrollbar-thumb {
   font-size: 14px;
   color: var(--primary-color);
   font-weight: 600;
+}
+
+.cycle-completion-field {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 6px;
+}
+
+.cycle-config-label {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.cycle-completion-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cycle-completion-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
+}
+
+.cycle-completion-option:hover,
+.cycle-completion-option.active {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+  background: rgba(239, 246, 255, 0.9);
+}
+
+.cycle-completion-option input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--primary-color);
 }
 
 .progress-track {

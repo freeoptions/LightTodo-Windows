@@ -285,6 +285,10 @@ impl SettingsStore {
     }
 }
 
+fn default_cycle_completion_mode() -> String {
+    "daily".to_string()
+}
+
 /// Todo item structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoItem {
@@ -323,6 +327,8 @@ pub struct TodoItem {
     pub cycle_active_days: Option<u32>,
     #[serde(rename = "cycleIntervalWeeks", alias = "cycle_interval_weeks", default)]
     pub cycle_interval_weeks: Option<u32>,
+    #[serde(rename = "cycleCompletionMode", alias = "cycle_completion_mode", default = "default_cycle_completion_mode")]
+    pub cycle_completion_mode: String, // "daily" 每天重置；"once" 周期内完成一次
     #[serde(rename = "priority", default)]
     pub priority: Option<u8>, // 1, 2, 3 或 None，只对父待办有效
     #[serde(rename = "order", default)]
@@ -359,6 +365,7 @@ impl TodoItem {
             cycle_start_date: None,
             cycle_active_days: None,
             cycle_interval_weeks: None,
+            cycle_completion_mode: default_cycle_completion_mode(),
             priority: None,
             order: None,
             week_start: None,
@@ -546,7 +553,11 @@ impl TodoStore {
         let mut changed = false;
 
         for todo in todos.iter_mut() {
-            if todo.parent_id.is_none() || todo.disabled || !todo.completed {
+            if todo.parent_id.is_none()
+                || todo.disabled
+                || !todo.completed
+                || todo.cycle_completion_mode == "once"
+            {
                 continue;
             }
 
@@ -1229,7 +1240,11 @@ impl TodoStore {
                 if let Some(cycle) = Self::cycle_window_for_date(todo, date_to_check) {
                     if cycle.active {
                         todo.expiry_date = Some(cycle.window_end.format("%Y-%m-%d").to_string());
-                        if !todo.disabled && todo.completed && !Self::completed_on_date(todo, date_to_check) {
+                        if todo.cycle_completion_mode != "once"
+                            && !todo.disabled
+                            && todo.completed
+                            && !Self::completed_on_date(todo, date_to_check)
+                        {
                             // Historical/future views are projections and must not mutate
                             // the saved state, but they still need to show a new daily state as open.
                             todo.completed = false;
@@ -1695,6 +1710,27 @@ mod tests {
 
         assert!(!child.completed);
         assert_eq!(child.completed_at, None);
+    }
+
+    #[test]
+    fn once_cycle_subtodo_stays_completed_until_the_next_cycle() {
+        let mut todos = vec![parent_todo("parent-1"), cyclic_subtodo("child-1", "parent-1")];
+        todos[1].cycle_completion_mode = "once".to_string();
+        todos[1].completed = true;
+        todos[1].completed_at = Some(1_784_035_200);
+        todos[1].last_reset_date = Some("2026-07-14".to_string());
+
+        let changed_within_window = TodoStore::reset_active_cycle_completions_for_date(&mut todos, "2026-07-16");
+        let child = todos.iter().find(|todo| todo.id == "child-1").unwrap();
+        assert!(!changed_within_window);
+        assert!(child.completed);
+
+        let changed_at_next_cycle = TodoStore::apply_cycle_activation_for_date(&mut todos, "2026-08-11");
+        let child = todos.iter().find(|todo| todo.id == "child-1").unwrap();
+        assert!(changed_at_next_cycle);
+        assert!(!child.completed);
+        assert_eq!(child.completed_at, None);
+        assert_eq!(child.last_reset_date.as_deref(), Some("2026-08-11"));
     }
 
     #[test]
