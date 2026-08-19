@@ -1329,6 +1329,38 @@ fn set_edge_window_topmost(window: &tauri::WebviewWindow, topmost: bool) {
 }
 
 #[cfg(target_os = "windows")]
+fn hide_window_close_button(window: &tauri::WebviewWindow) {
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_SYSMENU,
+        };
+
+        // Windows draws the native close button from WS_SYSMENU. Removing only
+        // SC_CLOSE from the system menu does not remove the caption button.
+        let current = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let next = current & !(WS_SYSMENU.0 as isize);
+
+        if next != current {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, next);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn dock_window_to_right_edge(window: &tauri::WebviewWindow, settings: &Settings) {
     const HANDLE_WIDTH: i32 = 18;
 
@@ -1734,6 +1766,11 @@ pub fn run() {
                 eprintln!("Docking main window to right edge...");
                 install_edge_dock_wnd_proc(&window);
                 dock_window_to_right_edge(&window, &settings);
+                // Tauri applies the final native frame while showing and sizing
+                // the window, so remove the close button only after that work
+                // has completed.
+                #[cfg(target_os = "windows")]
+                hide_window_close_button(&window);
             }
 
             start_edge_dock_monitor(app.handle().clone());
@@ -1757,6 +1794,14 @@ pub fn run() {
                             // Update visibility state
                             window_visible_for_close.store(false, Ordering::Relaxed);
                             eprintln!("[CloseEvent] Window hidden, visibility state updated to false");
+                        }
+                        #[cfg(target_os = "windows")]
+                        tauri::WindowEvent::Focused(true) |
+                        tauri::WindowEvent::Resized { .. } => {
+                            // Tauri/Windows may rebuild the non-client frame
+                            // when the window is shown or resized. Reapply the
+                            // title-bar style at those points as well.
+                            hide_window_close_button(&window_clone2);
                         }
                         _ => {}
                     }

@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { onMounted, onUnmounted, ref, computed, nextTick } from 'vue';
+import { onMounted, onUnmounted, ref, computed, nextTick, watch } from 'vue';
 import TodoList from './components/TodoList.vue';
 import Settings from './components/Settings.vue';
 import DatePicker from './components/DatePicker.vue';
@@ -180,6 +180,7 @@ const isViewingToday = computed(() => {
 const dateAccentColor = computed(() => getDateAccentColor(viewDateDisplay.value.isoDate));
 
 const activeParentTabId = ref<string | null>(null);
+const parentTabsPinned = ref(false);
 
 const parentTabs = computed(() => {
   return todos.value
@@ -195,6 +196,29 @@ const parentTabs = computed(() => {
       return a.index - b.index;
     });
 });
+
+const updateParentTabsPinned = () => {
+  const shell = document.querySelector<HTMLElement>('.parent-tabs-sticky');
+  if (!shell) {
+    parentTabsPinned.value = false;
+    return;
+  }
+
+  // Read the element's viewport position instead of window.scrollY. Tauri's
+  // WebView can scroll the document root/body directly, so window.scrollY is
+  // not guaranteed to reflect the layer that actually moved.
+  const shellTop = shell.getBoundingClientRect().top;
+  parentTabsPinned.value = shellTop <= 0;
+};
+
+watch(
+  parentTabs,
+  async () => {
+    await nextTick();
+    updateParentTabsPinned();
+  },
+  { flush: 'post' },
+);
 
 const handleParentTabsWheel = (event: WheelEvent) => {
   const target = event.currentTarget as HTMLElement | null;
@@ -325,6 +349,13 @@ onMounted(async () => {
     console.error('Failed to load settings:', e);
   }
 
+  const handlePageScroll = () => updateParentTabsPinned();
+  window.addEventListener('scroll', handlePageScroll, { passive: true });
+  document.addEventListener('scroll', handlePageScroll, { passive: true, capture: true });
+  window.addEventListener('resize', handlePageScroll);
+  await nextTick();
+  updateParentTabsPinned();
+
   // Listen for window events to save state
   const unlistenResize = await currentWindow.onResized(() => {
     console.log('Window resized, saving state...');
@@ -339,6 +370,9 @@ onMounted(async () => {
   onUnmounted(() => {
     unlistenResize();
     unlistenMove();
+    window.removeEventListener('scroll', handlePageScroll);
+    document.removeEventListener('scroll', handlePageScroll, true);
+    window.removeEventListener('resize', handlePageScroll);
   });
 });
 
@@ -1009,24 +1043,26 @@ const goToToday = async () => {
         </div>
       </header>
 
-      <nav
-        v-if="parentTabs.length > 0"
-        class="parent-tabs"
-        aria-label="父待办快速导航"
-        @wheel="handleParentTabsWheel"
-      >
-        <button
-          v-for="tab in parentTabs"
-          :key="tab.id"
-          type="button"
-          class="parent-tab"
-          :class="{ completed: tab.completed, active: activeParentTabId === tab.id }"
-          :title="tab.title"
-          @click="scrollToParentTodo(tab.id)"
+      <div v-if="parentTabs.length > 0" class="parent-tabs-sticky">
+        <nav
+          class="parent-tabs"
+          :class="{ 'is-pinned': parentTabsPinned }"
+          aria-label="父待办快速导航"
+          @wheel="handleParentTabsWheel"
         >
-          <span class="parent-tab-title">{{ tab.title }}</span>
-        </button>
-      </nav>
+          <button
+            v-for="tab in parentTabs"
+            :key="tab.id"
+            type="button"
+            class="parent-tab"
+            :class="{ completed: tab.completed, active: activeParentTabId === tab.id }"
+            :title="tab.title"
+            @click="scrollToParentTodo(tab.id)"
+          >
+            <span class="parent-tab-title">{{ tab.title }}</span>
+          </button>
+        </nav>
+      </div>
 
       <div class="app-content">
         <div v-if="error" class="error-message">
@@ -1383,6 +1419,7 @@ const goToToday = async () => {
   box-sizing: border-box;
 }
 
+html,
 body {
   font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -1390,23 +1427,16 @@ body {
   color: var(--text-primary);
   overflow-y: auto;
   background: var(--bg-app);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-::-webkit-scrollbar {
-  width: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: 999px;
-}
-
-body:hover::-webkit-scrollbar-thumb {
-  background: rgba(101, 113, 127, 0.35);
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+#app::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 #app {
@@ -1414,6 +1444,8 @@ body:hover::-webkit-scrollbar-thumb {
   position: relative;
   isolation: isolate;
   background: linear-gradient(rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.86));
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
 #app::before {
@@ -1523,17 +1555,33 @@ body:hover::-webkit-scrollbar-thumb {
   width: 100%;
 }
 
+.parent-tabs-sticky {
+  position: relative;
+  margin: 0 -18px 18px;
+  padding: 12px 18px 13px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(255, 255, 255, 0.94) 100%);
+  border-top: 1px solid rgba(226, 232, 240, 0.78);
+  border-bottom: 1px solid rgba(226, 232, 240, 0.92);
+  box-shadow: 0 10px 18px rgba(15, 23, 42, 0.05);
+}
+
 .parent-tabs {
-  position: sticky;
-  top: 0;
-  z-index: 320;
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 0 -18px 18px;
-  padding: 12px 18px 13px;
   overflow-x: auto;
   scrollbar-width: none;
+}
+
+.parent-tabs.is-pinned {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  z-index: 320;
+  width: min(640px, 100vw);
+  padding: 12px 18px 13px;
+  transform: translateX(-50%);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(255, 255, 255, 0.94) 100%);
   border-top: 1px solid rgba(226, 232, 240, 0.78);
