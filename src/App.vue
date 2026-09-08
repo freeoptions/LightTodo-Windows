@@ -5,6 +5,7 @@ import Settings from './components/Settings.vue';
 import DatePicker from './components/DatePicker.vue';
 import LongTermTodos from './components/LongTermTodos.vue';
 import DeadlineReminders from './components/DeadlineReminders.vue';
+import WeekdayPicker from './components/WeekdayPicker.vue';
 import { useTodos } from './composables/useTodos';
 import { type CycleCompletionMode, type RepeatMode, type TodoItem as TodoItemType } from './types/todo';
 import { invoke } from '@tauri-apps/api/core';
@@ -36,6 +37,7 @@ const newTodoRepeatMode = ref<RepeatMode>('daily'); // 默认每天重复
 const newTodoWeekdays = ref<number[]>([]); // 选中的周几 (1-7, 周一=1, 周日=7)
 const newTodoSpecificDates = ref<string[]>([]); // 选中的指定日期
 const newSubtodoCycleEnabled = ref(false);
+const newSubtodoActiveWeekdays = ref<number[]>([]);
 const newSubtodoExpiryDate = ref('');
 const newSubtodoCycleStartDate = ref('');
 const newSubtodoCycleActiveDays = ref(7);
@@ -66,7 +68,7 @@ const editingSubtodo = ref(false); // true if editing a subtodo (not parent)
 const modalSubtodos = ref<Array<{
   id: string;
   content: string;
-  activeWeekdays?: string;
+  activeWeekdays?: number[];
   expiryDate?: string;
   cycleStartDate?: string;
   cycleActiveDays?: number;
@@ -378,12 +380,30 @@ onMounted(async () => {
 
 const resetSubtodoCycleForm = () => {
   newSubtodoCycleEnabled.value = false;
+  newSubtodoActiveWeekdays.value = [];
   newSubtodoExpiryDate.value = '';
   newSubtodoCycleStartDate.value = '';
   newSubtodoCycleActiveDays.value = 7;
   newSubtodoCycleIntervalWeeks.value = 4;
   newSubtodoCycleCompletionMode.value = 'daily';
   subtodoValidationMessage.value = '';
+};
+
+const parseActiveWeekdays = (raw?: string | null) => {
+  if (!raw) return [];
+  return [...new Set(raw
+    .split(',')
+    .map((day) => Number.parseInt(day.trim(), 10))
+    .filter((day) => day >= 1 && day <= 7))]
+    .sort((a, b) => a - b);
+};
+
+const getActiveWeekdaysPayload = (weekdays: number[]) => {
+  const normalized = [...new Set(weekdays
+    .map((day) => Number(day))
+    .filter((day) => Number.isInteger(day) && day >= 1 && day <= 7))]
+    .sort((a, b) => a - b);
+  return normalized.length > 0 ? normalized.join(',') : null;
 };
 
 const getSubtodoCyclePayload = () => {
@@ -475,16 +495,16 @@ const openEditModal = async (id: string) => {
       newTodoSpecificDates.value = [];
     }
 
-    if (isSubtodo && todo.cycleStartDate) {
-      newSubtodoCycleEnabled.value = true;
-      newSubtodoExpiryDate.value = '';
-      newSubtodoCycleStartDate.value = todo.cycleStartDate;
-      newSubtodoCycleActiveDays.value = todo.cycleActiveDays || 7;
-      newSubtodoCycleIntervalWeeks.value = todo.cycleIntervalWeeks || 4;
-      newSubtodoCycleCompletionMode.value = todo.cycleCompletionMode || 'daily';
-    } else {
-      resetSubtodoCycleForm();
-      if (isSubtodo) {
+    resetSubtodoCycleForm();
+    if (isSubtodo) {
+      newSubtodoActiveWeekdays.value = parseActiveWeekdays(todo.activeWeekdays);
+      if (todo.cycleStartDate) {
+        newSubtodoCycleEnabled.value = true;
+        newSubtodoCycleStartDate.value = todo.cycleStartDate;
+        newSubtodoCycleActiveDays.value = todo.cycleActiveDays || 7;
+        newSubtodoCycleIntervalWeeks.value = todo.cycleIntervalWeeks || 4;
+        newSubtodoCycleCompletionMode.value = todo.cycleCompletionMode || 'daily';
+      } else {
         newSubtodoExpiryDate.value = todo.expiryDate || '';
       }
     }
@@ -494,7 +514,7 @@ const openEditModal = async (id: string) => {
       modalSubtodos.value = todo.subtodos.map(st => ({
         id: st.id,
         content: st.content,
-        activeWeekdays: st.activeWeekdays,
+        activeWeekdays: parseActiveWeekdays(st.activeWeekdays),
         expiryDate: st.expiryDate,
         cycleStartDate: st.cycleStartDate,
         cycleActiveDays: st.cycleActiveDays,
@@ -594,6 +614,13 @@ const updateModalSubtodo = (tempId: string, event: Event) => {
   const subtodo = modalSubtodos.value.find(st => st.id === tempId);
   if (subtodo) {
     subtodo.content = target.value;
+  }
+};
+
+const updateModalSubtodoActiveWeekdays = (tempId: string, weekdays: number[]) => {
+  const subtodo = modalSubtodos.value.find((item) => item.id === tempId);
+  if (subtodo) {
+    subtodo.activeWeekdays = weekdays;
   }
 };
 
@@ -728,6 +755,7 @@ const submitAddTodo = async () => {
       : undefined;
     const subtodoCyclePayload = getSubtodoCyclePayload();
     const subtodoExpiryDate = getSubtodoExpiryDatePayload();
+    const activeWeekdaysStr = getActiveWeekdaysPayload(newSubtodoActiveWeekdays.value);
 
     console.log("=== [SUBMIT] Starting submission, modalSubtodos.length =", modalSubtodos.value.length);
     console.log("=== [SUBMIT] newSubtodoContent =", newSubtodoContent.value.trim());
@@ -743,7 +771,7 @@ const submitAddTodo = async () => {
         repeatMode: newTodoRepeatMode.value,
         weekdays: weekdaysStr,
         activeWeekdays: editingSubtodo.value
-          ? findTodoInTree(todos.value, editingTodoId.value)?.activeWeekdays || null
+          ? activeWeekdaysStr
           : null,
         specificDates: specificDatesStr,
         expiryDate: editingSubtodo.value ? subtodoExpiryDate : null,
@@ -785,7 +813,7 @@ const submitAddTodo = async () => {
               content,
               repeatMode: 'none',
               weekdays: null,
-              activeWeekdays: subtodo.activeWeekdays || null,
+              activeWeekdays: getActiveWeekdaysPayload(subtodo.activeWeekdays || []),
               specificDates: null,
               expiryDate: subtodo.expiryDate || null,
               cycleStartDate: subtodo.cycleStartDate || null,
@@ -798,6 +826,7 @@ const submitAddTodo = async () => {
               content: content,
               repeatMode: 'none',
               weekdays: null,
+              activeWeekdays: getActiveWeekdaysPayload(subtodo.activeWeekdays || []),
               parentId: editingTodoId.value,
               expiryDate: subtodo.expiryDate || null,
               cycleStartDate: subtodo.cycleStartDate || null,
@@ -827,6 +856,7 @@ const submitAddTodo = async () => {
         content: newTodoContent.value.trim(),
         repeatMode: 'none',
         weekdays: null,
+        activeWeekdays: activeWeekdaysStr,
         specificDates: null,
         parentId: addingSubtodoForParentId.value,
         expiryDate: subtodoExpiryDate,
@@ -891,6 +921,7 @@ const submitAddTodo = async () => {
               content: content,
               repeatMode: 'none',
               weekdays: null,
+              activeWeekdays: getActiveWeekdaysPayload(subtodo.activeWeekdays || []),
               parentId: parentId,
               expiryDate: subtodo.expiryDate || null,
               cycleStartDate: subtodo.cycleStartDate || null,
@@ -1169,6 +1200,11 @@ const goToToday = async () => {
                   placeholder="子待办内容..."
                 />
                 <button @click="removeModalSubtodo(subtodo.id)" class="subtodo-remove">×</button>
+                <WeekdayPicker
+                  compact
+                  :model-value="subtodo.activeWeekdays"
+                  @update:model-value="updateModalSubtodoActiveWeekdays(subtodo.id, $event)"
+                />
               </div>
             </div>
 
@@ -1230,6 +1266,7 @@ const goToToday = async () => {
 
           <div v-if="addingSubtodoForParentId || editingSubtodo" class="form-group cycle-form-group">
             <label class="form-label">启用规则</label>
+            <WeekdayPicker v-model="newSubtodoActiveWeekdays" />
             <div v-if="subtodoValidationMessage" class="inline-validation" role="alert">
               <svg class="inline-validation-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 8v5M12 17h.01M10.3 3.9 2.9 17.1A2 2 0 0 0 4.6 20h14.8a2 2 0 0 0 1.7-2.9L13.7 3.9a2 2 0 0 0-3.4 0Z" />
@@ -2305,11 +2342,16 @@ body::-webkit-scrollbar,
 }
 
 .subtodo-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   padding: 6px 0;
+}
+
+.subtodo-item .weekday-picker {
+  grid-column: 1 / -1;
+  width: 100%;
 }
 
 .subtodo-input {

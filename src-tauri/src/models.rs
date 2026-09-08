@@ -1368,6 +1368,10 @@ pub struct DeadlineReminder {
     pub title: String,
     #[serde(rename = "dueDate")]
     pub due_date: String,
+    #[serde(default)]
+    pub completed: bool,
+    #[serde(rename = "completedAt", default)]
+    pub completed_at: Option<i64>,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
     #[serde(rename = "updatedAt")]
@@ -1381,6 +1385,8 @@ impl DeadlineReminder {
             id: Uuid::new_v4().to_string(),
             title,
             due_date,
+            completed: false,
+            completed_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -1452,6 +1458,23 @@ impl DeadlineReminderStore {
         reminder.title = title;
         reminder.due_date = due_date;
         reminder.updated_at = Local::now().timestamp();
+        self.save(&reminders)
+    }
+
+    pub fn toggle(&self, id: &str) -> Result<(), String> {
+        let mut reminders = self.load()?;
+        let reminder = reminders.iter_mut()
+            .find(|reminder| reminder.id == id)
+            .ok_or_else(|| format!("Deadline reminder not found: {}", id))?;
+
+        let now = Local::now().timestamp();
+        reminder.completed = !reminder.completed;
+        reminder.completed_at = if reminder.completed {
+            Some(now)
+        } else {
+            None
+        };
+        reminder.updated_at = now;
         self.save(&reminders)
     }
 
@@ -1742,6 +1765,47 @@ mod tests {
     }
 
     #[test]
+    fn active_weekdays_apply_to_subtodos_under_each_parent_repeat_mode() {
+        let current_week_monday = TodoStore::current_week_monday();
+        let current_month_first = TodoStore::current_month_first();
+        let week_monday = NaiveDate::parse_from_str(&current_week_monday, "%Y-%m-%d").unwrap();
+        let active_date = (week_monday + Duration::days(2)).format("%Y-%m-%d").to_string();
+        let inactive_date = (week_monday + Duration::days(3)).format("%Y-%m-%d").to_string();
+
+        let parent_modes = [
+            ("daily", None, None),
+            ("weekly_this_week", Some(current_week_monday.as_str()), None),
+            ("monthly_this_month", None, Some(current_month_first.as_str())),
+        ];
+
+        for (index, (repeat_mode, week_start, month_start)) in parent_modes.into_iter().enumerate() {
+            let store = todo_store_for_test(&format!("active_weekdays_{}", index));
+            let mut parent = parent_todo(&format!("parent-{}", index));
+            parent.repeat_mode = repeat_mode.to_string();
+            parent.week_start = week_start.map(str::to_string);
+            parent.month_start = month_start.map(str::to_string);
+
+            let mut child = TodoItem::new(
+                "按星期展示的子待办".to_string(),
+                "none".to_string(),
+                None,
+                Some(parent.id.clone()),
+            );
+            child.active_weekdays = Some("1,3,5".to_string());
+            store.save(&[parent, child]).unwrap();
+
+            let visible_on_wednesday = store.get_todos(Some(&active_date)).unwrap();
+            let child_on_wednesday = visible_on_wednesday.iter().find(|todo| todo.parent_id.is_some()).unwrap();
+            assert!(!child_on_wednesday.inactive_by_weekday);
+
+            let inactive_on_thursday = store.get_todos(Some(&inactive_date)).unwrap();
+            let child_on_thursday = inactive_on_thursday.iter().find(|todo| todo.parent_id.is_some()).unwrap();
+            assert!(child_on_thursday.inactive_by_weekday);
+            assert!(child_on_thursday.completed);
+        }
+    }
+
+    #[test]
     fn deadline_reminder_store_round_trips_multiple_reminders() {
         let dir = std::env::temp_dir().join(format!("lighttodo_deadline_test_{}", Uuid::new_v4()));
         let store = DeadlineReminderStore::new(dir);
@@ -1749,6 +1813,18 @@ mod tests {
         let first = store.add("提交材料".to_string(), "2026-08-01".to_string()).unwrap();
         let second = store.add("续签证件".to_string(), "2026-08-07".to_string()).unwrap();
         assert_eq!(store.load().unwrap().len(), 2);
+        assert!(!first.completed);
+        assert_eq!(first.completed_at, None);
+
+        store.toggle(&first.id).unwrap();
+        let completed = store.load().unwrap().into_iter().find(|item| item.id == first.id).unwrap();
+        assert!(completed.completed);
+        assert!(completed.completed_at.is_some());
+
+        store.toggle(&first.id).unwrap();
+        let reopened = store.load().unwrap().into_iter().find(|item| item.id == first.id).unwrap();
+        assert!(!reopened.completed);
+        assert_eq!(reopened.completed_at, None);
 
         store.update(&first.id, "提交完整材料".to_string(), "2026-08-02".to_string()).unwrap();
         let updated = store.load().unwrap().into_iter().find(|item| item.id == first.id).unwrap();
@@ -1757,6 +1833,21 @@ mod tests {
 
         store.delete(&second.id).unwrap();
         assert_eq!(store.load().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deadline_reminder_defaults_to_incomplete_for_legacy_json() {
+        let legacy = r#"{
+            "id": "legacy-reminder",
+            "title": "旧提醒",
+            "dueDate": "2026-08-01",
+            "createdAt": 1,
+            "updatedAt": 1
+        }"#;
+
+        let reminder: DeadlineReminder = serde_json::from_str(legacy).unwrap();
+        assert!(!reminder.completed);
+        assert_eq!(reminder.completed_at, None);
     }
 
     #[test]

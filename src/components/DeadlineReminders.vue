@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useDeadlineReminders } from '../composables/useDeadlineReminders';
+import type { DeadlineReminder } from '../types/todo';
 
 const {
   reminders,
@@ -9,6 +10,7 @@ const {
   loadReminders,
   addReminder,
   updateReminder,
+  toggleReminder,
   deleteReminder,
 } = useDeadlineReminders();
 
@@ -21,6 +23,7 @@ const saving = ref(false);
 const showDeleteConfirm = ref(false);
 const deletingId = ref<string | null>(null);
 const deleting = ref(false);
+const togglingId = ref<string | null>(null);
 const clockTick = ref(Date.now());
 let clockTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -42,16 +45,18 @@ const daysUntil = (dueDate: string) => {
   return dateToDayNumber(dueDate) - dateToDayNumber(todayIso.value);
 };
 
-const statusFor = (dueDate: string) => {
-  const days = daysUntil(dueDate);
+const statusFor = (reminder: DeadlineReminder) => {
+  if (reminder.completed) return 'completed';
+  const days = daysUntil(reminder.dueDate);
   if (days < 0) return 'overdue';
   if (days === 0) return 'today';
   if (days <= 4) return 'urgent';
   return 'normal';
 };
 
-const statusTextFor = (dueDate: string) => {
-  const days = daysUntil(dueDate);
+const statusTextFor = (reminder: DeadlineReminder) => {
+  if (reminder.completed) return '已完成';
+  const days = daysUntil(reminder.dueDate);
   if (days < 0) return `已逾期 ${Math.abs(days)} 天`;
   if (days === 0) return '今天到期';
   if (days === 1) return '明天到期';
@@ -64,12 +69,14 @@ const formatDueDate = (isoDate: string) => {
 };
 
 const sortedReminders = computed(() => [...reminders.value].sort((a, b) => {
+  if (a.completed !== b.completed) return a.completed ? 1 : -1;
   const dateOrder = a.dueDate.localeCompare(b.dueDate);
   if (dateOrder !== 0) return dateOrder;
   return a.createdAt - b.createdAt;
 }));
 
 const urgentCount = computed(() => sortedReminders.value.filter((reminder) => {
+  if (reminder.completed) return false;
   const days = daysUntil(reminder.dueDate);
   return days <= 4;
 }).length);
@@ -155,6 +162,19 @@ const confirmDeleteReminder = async () => {
   }
 };
 
+const toggleReminderCompletion = async (id: string) => {
+  if (togglingId.value) return;
+  togglingId.value = id;
+  error.value = null;
+  try {
+    await toggleReminder(id);
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    togglingId.value = null;
+  }
+};
+
 onMounted(() => {
   loadReminders();
   clockTimer = setInterval(() => {
@@ -188,8 +208,19 @@ onUnmounted(() => {
         v-for="reminder in sortedReminders"
         :key="reminder.id"
         class="deadline-item"
-        :class="`deadline-item-${statusFor(reminder.dueDate)}`"
+        :class="`deadline-item-${statusFor(reminder)}`"
       >
+        <button
+          type="button"
+          class="deadline-complete-button"
+          :class="{ completed: reminder.completed }"
+          :disabled="togglingId === reminder.id"
+          :title="reminder.completed ? '标记为未完成' : '标记为完成'"
+          :aria-label="reminder.completed ? '标记为未完成' : '标记为完成'"
+          @click="toggleReminderCompletion(reminder.id)"
+        >
+          <svg v-if="reminder.completed" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7" /></svg>
+        </button>
         <div class="deadline-date-badge">
           <span>{{ reminder.dueDate.slice(5, 7) }}</span>
           <strong>{{ reminder.dueDate.slice(8, 10) }}</strong>
@@ -199,7 +230,7 @@ onUnmounted(() => {
           <div class="deadline-item-meta">
             <span>{{ formatDueDate(reminder.dueDate) }}</span>
             <span class="deadline-dot">·</span>
-            <strong>{{ statusTextFor(reminder.dueDate) }}</strong>
+            <strong>{{ statusTextFor(reminder) }}</strong>
           </div>
         </div>
         <div class="deadline-item-actions">
@@ -406,6 +437,58 @@ onUnmounted(() => {
   box-shadow: 0 7px 15px rgba(23, 33, 43, 0.06);
 }
 
+.deadline-complete-button {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  place-items: center;
+  padding: 0;
+  border: 2px solid #cbd5e1;
+  border-radius: 50%;
+  color: #ffffff;
+  background: #ffffff;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.deadline-complete-button:hover {
+  transform: scale(1.06);
+  border-color: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.12);
+}
+
+.deadline-complete-button.completed {
+  border-color: #16a34a;
+  background: #16a34a;
+}
+
+.deadline-complete-button.completed:hover {
+  border-color: #15803d;
+  background: #15803d;
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.14);
+}
+
+.deadline-complete-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.deadline-complete-button:focus-visible {
+  outline: 3px solid rgba(34, 197, 94, 0.28);
+  outline-offset: 2px;
+}
+
+.deadline-complete-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.5;
+}
+
 .deadline-item-urgent {
   border-color: rgba(124, 58, 237, 0.38);
   background: #faf7ff;
@@ -420,6 +503,30 @@ onUnmounted(() => {
 .deadline-item-overdue {
   border-color: rgba(220, 38, 38, 0.5);
   background: #fff1f2;
+}
+
+.deadline-item-completed {
+  border-color: #dbe4ee;
+  background: #f8fafc;
+}
+
+.deadline-item-completed:hover {
+  border-color: #cbd5e1;
+}
+
+.deadline-item-completed .deadline-item-title {
+  color: #64748b;
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
+.deadline-item-completed .deadline-item-meta strong {
+  color: #16a34a;
+}
+
+.deadline-item-completed .deadline-date-badge {
+  filter: grayscale(0.45);
+  opacity: 0.78;
 }
 
 .deadline-date-badge {

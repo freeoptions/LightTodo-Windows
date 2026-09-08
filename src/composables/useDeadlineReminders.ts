@@ -42,6 +42,11 @@ export function useDeadlineReminders() {
     reminders.value = await invoke<DeadlineReminder[]>('delete_deadline_reminder', { id });
   };
 
+  const toggleReminder = async (id: string) => {
+    error.value = null;
+    reminders.value = await invoke<DeadlineReminder[]>('toggle_deadline_reminder', { id });
+  };
+
   return {
     reminders,
     loading,
@@ -49,6 +54,7 @@ export function useDeadlineReminders() {
     loadReminders,
     addReminder,
     updateReminder,
+    toggleReminder,
     deleteReminder,
   };
 }

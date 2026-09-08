@@ -552,11 +552,9 @@ async fn edit_todo(handle: AppHandle, id: String, content: String, repeat_mode: 
         todo.repeat_mode = repeat_mode.clone();
         todo.weekdays = if repeat_mode == "weekly" { weekdays } else { None };
         if is_subtodo {
-            // The current editor does not expose weekday activation yet; preserve it
-            // when the payload omits the field instead of silently clearing it.
-            if active_weekdays.is_some() {
-                todo.active_weekdays = active_weekdays;
-            }
+            // Subtodo weekday activation is editable; an empty selection clears it
+            // and restores the default of showing the subtodo every day.
+            todo.active_weekdays = active_weekdays;
         } else {
             todo.active_weekdays = None;
         }
@@ -1190,6 +1188,15 @@ fn update_deadline_reminder(
     due_date: String,
 ) -> Result<Vec<DeadlineReminder>, String> {
     store.update(&id, title, due_date)?;
+    store.load()
+}
+
+#[tauri::command]
+fn toggle_deadline_reminder(
+    store: State<'_, DeadlineReminderStore>,
+    id: String,
+) -> Result<Vec<DeadlineReminder>, String> {
+    store.toggle(&id)?;
     store.load()
 }
 
@@ -1839,6 +1846,7 @@ pub fn run() {
             get_deadline_reminders,
             add_deadline_reminder,
             update_deadline_reminder,
+            toggle_deadline_reminder,
             delete_deadline_reminder,
         ])
         .run(tauri::generate_context!())

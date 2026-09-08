@@ -70,13 +70,14 @@ const canToggle = computed(() => {
 // Check if this todo is disabled
 const isInactiveByWeekday = computed(() => props.todo.inactiveByWeekday === true);
 const isCycleInactive = computed(() => isInactiveByWeekday.value && !!props.todo.cycleStartDate);
-const isDisabled = computed(() => props.todo.disabled === true || isInactiveByWeekday.value);
+const isManuallyDisabled = computed(() => props.todo.disabled === true);
+const isDisabled = computed(() => isManuallyDisabled.value || isInactiveByWeekday.value);
 
-// Can operate? (disabled todos cannot be operated on)
-const canOperate = computed(() => !isDisabled.value);
+// Scheduled-inactive subtodos remain editable; manually disabled todos remain locked.
+const canOperate = computed(() => !isManuallyDisabled.value);
 
-// Can edit? (not completed and can operate)
-const canEdit = computed(() => !props.todo.completed && canOperate.value);
+// A weekday-inactive subtodo is projected as completed for the current date, but must still be editable.
+const canEdit = computed(() => (!props.todo.completed || isInactiveByWeekday.value) && canOperate.value);
 const statusBadgeText = computed(() => {
   if (isInactiveByWeekday.value) return '今日停用';
   if (props.todo.disabled) return '已禁用';

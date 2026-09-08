@@ -61,6 +61,8 @@ export interface DeadlineReminder {
   id: string;
   title: string;
   dueDate: string;
+  completed: boolean;
+  completedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
