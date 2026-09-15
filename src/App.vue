@@ -318,6 +318,12 @@ const saveCurrentWindowState = async () => {
       currentWindow.scaleFactor(),
     ]);
 
+    // The edge-dock handle is a temporary 18x90px window. Do not persist
+    // its size as the user's normal window geometry.
+    if (size.width <= 72 && size.height <= 180) {
+      return;
+    }
+
     await invoke('save_window_state', {
       x: Math.round(position.x / scaleFactor),
       y: Math.round(position.y / scaleFactor),
