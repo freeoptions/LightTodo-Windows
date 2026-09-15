@@ -15,8 +15,6 @@ static EDGE_DOCK_HIDDEN: AtomicBool = AtomicBool::new(false);
 static EDGE_DOCK_OLD_WND_PROC: AtomicIsize = AtomicIsize::new(0);
 #[cfg(target_os = "windows")]
 static EDGE_DOCK_WND_PROC_INSTALLED: AtomicBool = AtomicBool::new(false);
-#[cfg(target_os = "windows")]
-static EDGE_DOCK_SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // Windows-specific code for forcing window to foreground
 #[cfg(target_os = "windows")]
@@ -188,14 +186,6 @@ fn sync_auto_launch_with_settings(_settings: &Settings, _store: &SettingsStore) 
 
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        #[cfg(target_os = "windows")]
-        if EDGE_DOCK_HIDDEN.load(AtomicOrdering::Relaxed) {
-            // Let the edge monitor restore the full window after the native
-            // foreground operation below, because the hidden handle is only
-            // a small temporary window.
-            EDGE_DOCK_SHOW_REQUESTED.store(true, AtomicOrdering::Relaxed);
-        }
-
         #[cfg(target_os = "windows")]
         {
             match window.hwnd() {
@@ -1378,62 +1368,9 @@ fn hide_window_close_button(window: &tauri::WebviewWindow) {
 }
 
 #[cfg(target_os = "windows")]
-const EDGE_DOCK_HANDLE_WIDTH: i32 = 18;
-#[cfg(target_os = "windows")]
-const EDGE_DOCK_HANDLE_HEIGHT: i32 = 100;
-#[cfg(target_os = "windows")]
-const EDGE_DOCK_HOVER_PADDING: i32 = 2;
-#[cfg(target_os = "windows")]
-const EDGE_DOCK_NORMAL_MIN_WIDTH: f64 = 400.0;
-#[cfg(target_os = "windows")]
-const EDGE_DOCK_NORMAL_MIN_HEIGHT: f64 = 500.0;
-
-#[cfg(target_os = "windows")]
-fn edge_dock_handle_y(
-    expanded_y: i32,
-    expanded_height: i32,
-    monitor_top: i32,
-    monitor_bottom: i32,
-) -> i32 {
-    let max_expanded_y = (monitor_bottom - expanded_height).max(monitor_top);
-    let expanded_y = expanded_y.clamp(monitor_top, max_expanded_y);
-    let centered_offset = (expanded_height - EDGE_DOCK_HANDLE_HEIGHT).max(0) / 2;
-    (expanded_y + centered_offset).clamp(
-        monitor_top,
-        (monitor_bottom - EDGE_DOCK_HANDLE_HEIGHT).max(monitor_top),
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn set_edge_dock_handle_size(window: &tauri::WebviewWindow) {
-    let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
-    let handle_size = tauri::LogicalSize::new(
-        EDGE_DOCK_HANDLE_WIDTH as f64 / scale,
-        EDGE_DOCK_HANDLE_HEIGHT as f64 / scale,
-    );
-
-    // Tauri's configured minimum size is kept for normal use, but must be
-    // temporarily lowered so the hidden hit area can actually be small.
-    let _ = window.set_min_size(Some(handle_size));
-    let _ = window.set_size(handle_size);
-}
-
-#[cfg(target_os = "windows")]
-fn restore_edge_dock_window_size(
-    window: &tauri::WebviewWindow,
-    inner_size: Option<(u32, u32)>,
-    fallback_size: (u32, u32),
-) {
-    let (width, height) = inner_size.unwrap_or(fallback_size);
-    let _ = window.set_size(tauri::PhysicalSize::new(width, height));
-    let _ = window.set_min_size(Some(tauri::LogicalSize::new(
-        EDGE_DOCK_NORMAL_MIN_WIDTH,
-        EDGE_DOCK_NORMAL_MIN_HEIGHT,
-    )));
-}
-
-#[cfg(target_os = "windows")]
 fn dock_window_to_right_edge(window: &tauri::WebviewWindow, settings: &Settings) {
+    const HANDLE_WIDTH: i32 = 18;
+
     let monitor = window
         .primary_monitor()
         .ok()
@@ -1458,7 +1395,7 @@ fn dock_window_to_right_edge(window: &tauri::WebviewWindow, settings: &Settings)
     let monitor_top = monitor.position().y;
     let monitor_right = monitor.position().x + monitor.size().width as i32;
     let monitor_bottom = monitor_top + monitor.size().height as i32;
-    let hidden_x = monitor_right - EDGE_DOCK_HANDLE_WIDTH;
+    let hidden_x = monitor_right - HANDLE_WIDTH;
     let requested_y = (settings.window.y as f64 * scale).round() as i32;
     let hidden_y = requested_y.clamp(monitor_top, (monitor_bottom - physical_height).max(monitor_top));
 
@@ -1475,18 +1412,17 @@ fn dock_window_to_right_edge(window: &tauri::WebviewWindow, _settings: &Settings
 }
 
 #[cfg(target_os = "windows")]
-fn start_edge_dock_monitor(app: AppHandle, initial_inner_size: (u32, u32)) {
+fn start_edge_dock_monitor(app: AppHandle) {
     std::thread::spawn(move || {
+        const HANDLE_WIDTH: i32 = 18;
         const EDGE_THRESHOLD: i32 = 24;
-        const HOVER_PADDING: i32 = EDGE_DOCK_HOVER_PADDING;
+        const HOVER_WIDTH: i32 = 7;
         const LEAVE_PADDING: i32 = 10;
         const EXPANDED_MARGIN: i32 = 18;
         const TICK_MS: u64 = 120;
 
         let mut is_hidden_to_edge = false;
         let mut last_hidden_y: Option<i32> = None;
-        let mut expanded_inner_size: Option<(u32, u32)> = Some(initial_inner_size);
-        let mut expanded_outer_size: Option<(u32, u32)> = None;
         let mut startup_dock_checked = false;
 
         loop {
@@ -1508,25 +1444,14 @@ fn start_edge_dock_monitor(app: AppHandle, initial_inner_size: (u32, u32)) {
                     if let Some(monitor) = monitor {
                         let monitor_top = monitor.position().y;
                         let monitor_right = monitor.position().x + monitor.size().width as i32;
-                        let hidden_x = monitor_right - EDGE_DOCK_HANDLE_WIDTH;
-                        let expanded_size = expanded_outer_size.unwrap_or((
-                            initial_inner_size.0,
-                            initial_inner_size.1,
-                        ));
-                        let expanded_y = last_hidden_y.unwrap_or(monitor_top + 120);
-                        let handle_y = edge_dock_handle_y(
-                            expanded_y,
-                            expanded_size.1 as i32,
-                            monitor_top,
-                            monitor_top + monitor.size().height as i32,
-                        );
+                        let hidden_x = monitor_right - HANDLE_WIDTH;
+                        let y = last_hidden_y.unwrap_or(monitor_top + 120).max(monitor_top);
 
                         let _ = window.unminimize();
                         let _ = window.show();
                         set_edge_dock_window_style(&window, true);
                         set_edge_window_topmost(&window, true);
-                        set_edge_dock_handle_size(&window);
-                        let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, handle_y));
+                        let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, y));
                     }
                 }
                 continue;
@@ -1535,10 +1460,8 @@ fn start_edge_dock_monitor(app: AppHandle, initial_inner_size: (u32, u32)) {
             if !window.is_visible().unwrap_or(false) {
                 is_hidden_to_edge = false;
                 EDGE_DOCK_HIDDEN.store(false, AtomicOrdering::Relaxed);
-                EDGE_DOCK_SHOW_REQUESTED.store(false, AtomicOrdering::Relaxed);
                 set_edge_dock_window_style(&window, false);
                 last_hidden_y = None;
-                expanded_outer_size = None;
                 continue;
             }
 
@@ -1570,77 +1493,28 @@ fn start_edge_dock_monitor(app: AppHandle, initial_inner_size: (u32, u32)) {
             let window_right = x + width;
             let window_bottom = y + height;
 
-            let hidden_x = monitor_right - EDGE_DOCK_HANDLE_WIDTH;
-            let is_handle_sized = width <= EDGE_DOCK_HANDLE_WIDTH * 4
-                && height <= EDGE_DOCK_HANDLE_HEIGHT * 2;
-
-            if !is_handle_sized && width > EDGE_DOCK_HANDLE_WIDTH * 4 {
-                expanded_outer_size = Some((size.width, size.height));
-                expanded_inner_size = window
-                    .inner_size()
-                    .ok()
-                    .map(|inner| (inner.width, inner.height));
-            }
-
-            let (expanded_width, expanded_height) = expanded_outer_size.unwrap_or((
-                initial_inner_size.0,
-                initial_inner_size.1,
-            ));
-            let expanded_x = (monitor_right - expanded_width as i32 - EXPANDED_MARGIN)
-                .max(monitor_left);
-            let expanded_y = last_hidden_y.unwrap_or(y).clamp(
-                monitor_top,
-                (monitor_bottom - expanded_height as i32).max(monitor_top),
-            );
-            let handle_y = if is_handle_sized {
-                y
-            } else {
-                edge_dock_handle_y(
-                    expanded_y,
-                    expanded_height as i32,
-                    monitor_top,
-                    monitor_bottom,
-                )
-            };
-            let handle_bottom = handle_y + EDGE_DOCK_HANDLE_HEIGHT;
+            let hidden_x = monitor_right - HANDLE_WIDTH;
+            let expanded_x = (monitor_right - width - EXPANDED_MARGIN).max(monitor_left);
+            let clamped_y = y.clamp(monitor_top, (monitor_bottom - height).max(monitor_top));
 
             let cursor_in_window = cursor.x >= x
                 && cursor.x <= window_right
                 && cursor.y >= y
                 && cursor.y <= window_bottom;
-            let cursor_near_handle = cursor.x >= hidden_x - HOVER_PADDING
-                && cursor.x <= monitor_right + HOVER_PADDING
-                && cursor.y >= handle_y - HOVER_PADDING
-                && cursor.y <= handle_bottom + HOVER_PADDING;
-            let force_show = EDGE_DOCK_SHOW_REQUESTED.swap(false, AtomicOrdering::Relaxed);
+            let cursor_near_handle = cursor.x >= monitor_right - HOVER_WIDTH
+                && cursor.x <= monitor_right + HOVER_WIDTH
+                && cursor.y >= y - HOVER_WIDTH
+                && cursor.y <= window_bottom + HOVER_WIDTH;
 
             if is_hidden_to_edge || x >= hidden_x - 1 {
                 is_hidden_to_edge = true;
                 EDGE_DOCK_HIDDEN.store(true, AtomicOrdering::Relaxed);
-                if !is_handle_sized {
-                    last_hidden_y = Some(expanded_y);
-                    set_edge_dock_window_style(&window, true);
-                    set_edge_window_topmost(&window, true);
-                    set_edge_dock_handle_size(&window);
-                    let handle_y = edge_dock_handle_y(
-                        expanded_y,
-                        expanded_height as i32,
-                        monitor_top,
-                        monitor_bottom,
-                    );
-                    let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, handle_y));
-                }
-
-                if cursor_near_handle || force_show {
+                last_hidden_y = Some(clamped_y);
+                if cursor_near_handle {
                     let _ = window.unminimize();
                     let _ = window.show();
-                    restore_edge_dock_window_size(
-                        &window,
-                        expanded_inner_size,
-                        (expanded_width, expanded_height),
-                    );
                     set_edge_dock_window_style(&window, false);
-                    let _ = window.set_position(tauri::PhysicalPosition::new(expanded_x, expanded_y));
+                    let _ = window.set_position(tauri::PhysicalPosition::new(expanded_x, clamped_y));
                     set_edge_window_topmost(&window, false);
                     is_hidden_to_edge = false;
                     EDGE_DOCK_HIDDEN.store(false, AtomicOrdering::Relaxed);
@@ -1651,9 +1525,9 @@ fn start_edge_dock_monitor(app: AppHandle, initial_inner_size: (u32, u32)) {
 
             let is_right_docked = window_right >= monitor_right - EDGE_THRESHOLD
                 && x < hidden_x
-                && width > EDGE_DOCK_HANDLE_WIDTH * 4;
+                && width > HANDLE_WIDTH * 4;
             let cursor_left_window = cursor.x < x - LEAVE_PADDING
-                || cursor.x > monitor_right + HOVER_PADDING
+                || cursor.x > monitor_right + HOVER_WIDTH
                 || cursor.y < y - LEAVE_PADDING
                 || cursor.y > window_bottom + LEAVE_PADDING;
 
@@ -1664,16 +1538,9 @@ fn start_edge_dock_monitor(app: AppHandle, initial_inner_size: (u32, u32)) {
                     EDGE_DOCK_HIDDEN.store(true, AtomicOrdering::Relaxed);
                     set_edge_dock_window_style(&window, true);
                     set_edge_window_topmost(&window, true);
-                    set_edge_dock_handle_size(&window);
-                    let handle_y = edge_dock_handle_y(
-                        y,
-                        height,
-                        monitor_top,
-                        monitor_bottom,
-                    );
-                    let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, handle_y));
+                    let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, clamped_y));
                     is_hidden_to_edge = true;
-                    last_hidden_y = Some(y);
+                    last_hidden_y = Some(clamped_y);
                     continue;
                 }
             }
@@ -1682,23 +1549,16 @@ fn start_edge_dock_monitor(app: AppHandle, initial_inner_size: (u32, u32)) {
                 EDGE_DOCK_HIDDEN.store(true, AtomicOrdering::Relaxed);
                 set_edge_dock_window_style(&window, true);
                 set_edge_window_topmost(&window, true);
-                set_edge_dock_handle_size(&window);
-                let handle_y = edge_dock_handle_y(
-                    y,
-                    height,
-                    monitor_top,
-                    monitor_bottom,
-                );
-                let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, handle_y));
+                let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, clamped_y));
                 is_hidden_to_edge = true;
-                last_hidden_y = Some(y);
+                last_hidden_y = Some(clamped_y);
             }
         }
     });
 }
 
 #[cfg(not(target_os = "windows"))]
-fn start_edge_dock_monitor(_app: AppHandle, _initial_inner_size: (u32, u32)) {}
+fn start_edge_dock_monitor(_app: AppHandle) {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -1920,10 +1780,7 @@ pub fn run() {
                 hide_window_close_button(&window);
             }
 
-            start_edge_dock_monitor(
-                app.handle().clone(),
-                (settings.window.width, settings.window.height),
-            );
+            start_edge_dock_monitor(app.handle().clone());
 
             // Handle window close event - hide instead of close
             if let Some(window) = app.get_webview_window("main") {
