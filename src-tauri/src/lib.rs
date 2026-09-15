@@ -1380,7 +1380,7 @@ fn hide_window_close_button(window: &tauri::WebviewWindow) {
 #[cfg(target_os = "windows")]
 const EDGE_DOCK_HANDLE_WIDTH: i32 = 18;
 #[cfg(target_os = "windows")]
-const EDGE_DOCK_HANDLE_HEIGHT: i32 = 90;
+const EDGE_DOCK_HANDLE_HEIGHT: i32 = 100;
 #[cfg(target_os = "windows")]
 const EDGE_DOCK_HOVER_PADDING: i32 = 2;
 #[cfg(target_os = "windows")]
@@ -1632,16 +1632,15 @@ fn start_edge_dock_monitor(app: AppHandle, initial_inner_size: (u32, u32)) {
                 }
 
                 if cursor_near_handle || force_show {
-                    // The handle window is already visible and not minimized.
-                    // Moving it before resizing keeps the full window from
-                    // being briefly painted at the screen edge.
-                    let _ = window.set_position(tauri::PhysicalPosition::new(expanded_x, expanded_y));
+                    let _ = window.unminimize();
+                    let _ = window.show();
                     restore_edge_dock_window_size(
                         &window,
                         expanded_inner_size,
                         (expanded_width, expanded_height),
                     );
                     set_edge_dock_window_style(&window, false);
+                    let _ = window.set_position(tauri::PhysicalPosition::new(expanded_x, expanded_y));
                     set_edge_window_topmost(&window, false);
                     is_hidden_to_edge = false;
                     EDGE_DOCK_HIDDEN.store(false, AtomicOrdering::Relaxed);
