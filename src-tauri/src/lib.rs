@@ -15,6 +15,8 @@ static EDGE_DOCK_HIDDEN: AtomicBool = AtomicBool::new(false);
 static EDGE_DOCK_OLD_WND_PROC: AtomicIsize = AtomicIsize::new(0);
 #[cfg(target_os = "windows")]
 static EDGE_DOCK_WND_PROC_INSTALLED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+static EDGE_DOCK_SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // Windows-specific code for forcing window to foreground
 #[cfg(target_os = "windows")]
@@ -187,6 +189,13 @@ fn sync_auto_launch_with_settings(_settings: &Settings, _store: &SettingsStore) 
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         #[cfg(target_os = "windows")]
+        if EDGE_DOCK_HIDDEN.load(AtomicOrdering::Relaxed) {
+            // The visible edge handle is still the same window. Ask the
+            // monitor to move it back to its full size before showing it.
+            EDGE_DOCK_SHOW_REQUESTED.store(true, AtomicOrdering::Relaxed);
+        }
+
+        #[cfg(target_os = "windows")]
         {
             match window.hwnd() {
                 Ok(hwnd) => {
@@ -224,6 +233,16 @@ fn hide_main_window(app: &AppHandle) {
 
 fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "windows")]
+        if window.is_visible().unwrap_or(false)
+            && EDGE_DOCK_HIDDEN.load(AtomicOrdering::Relaxed)
+        {
+            // A docked handle is technically visible, so treating it as a
+            // normal visible window would hide it on the first tray click.
+            show_main_window(app);
+            return;
+        }
+
         match window.is_visible() {
             Ok(true) => hide_main_window(app),
             Ok(false) => show_main_window(app),
@@ -1421,9 +1440,13 @@ fn start_edge_dock_monitor(app: AppHandle) {
         const EXPANDED_MARGIN: i32 = 18;
         const TICK_MS: u64 = 120;
 
-        let mut is_hidden_to_edge = false;
+        // dock_window_to_right_edge() runs before this thread starts. Keep
+        // that initial state so a hidden/minimized startup window is restored
+        // to the edge instead of waiting for a tray interaction.
+        let mut is_hidden_to_edge = EDGE_DOCK_HIDDEN.load(AtomicOrdering::Relaxed);
         let mut last_hidden_y: Option<i32> = None;
         let mut startup_dock_checked = false;
+        let mut startup_dock_pending = true;
 
         loop {
             std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
@@ -1458,8 +1481,15 @@ fn start_edge_dock_monitor(app: AppHandle) {
             }
 
             if !window.is_visible().unwrap_or(false) {
+                if startup_dock_pending {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    continue;
+                }
+
                 is_hidden_to_edge = false;
                 EDGE_DOCK_HIDDEN.store(false, AtomicOrdering::Relaxed);
+                EDGE_DOCK_SHOW_REQUESTED.store(false, AtomicOrdering::Relaxed);
                 set_edge_dock_window_style(&window, false);
                 last_hidden_y = None;
                 continue;
@@ -1481,6 +1511,8 @@ fn start_edge_dock_monitor(app: AppHandle) {
             let Some(cursor) = cursor_position() else {
                 continue;
             };
+
+            startup_dock_pending = false;
 
             let monitor_left = monitor.position().x;
             let monitor_top = monitor.position().y;
@@ -1510,7 +1542,9 @@ fn start_edge_dock_monitor(app: AppHandle) {
                 is_hidden_to_edge = true;
                 EDGE_DOCK_HIDDEN.store(true, AtomicOrdering::Relaxed);
                 last_hidden_y = Some(clamped_y);
-                if cursor_near_handle {
+                let force_show = EDGE_DOCK_SHOW_REQUESTED.swap(false, AtomicOrdering::Relaxed);
+
+                if cursor_near_handle || force_show {
                     let _ = window.unminimize();
                     let _ = window.show();
                     set_edge_dock_window_style(&window, false);
@@ -1519,6 +1553,11 @@ fn start_edge_dock_monitor(app: AppHandle) {
                     is_hidden_to_edge = false;
                     EDGE_DOCK_HIDDEN.store(false, AtomicOrdering::Relaxed);
                     last_hidden_y = None;
+                } else if x != hidden_x {
+                    // Re-apply the edge position once after startup. Native
+                    // window creation can ignore the first set_position call
+                    // while the window is still becoming visible.
+                    let _ = window.set_position(tauri::PhysicalPosition::new(hidden_x, clamped_y));
                 }
                 continue;
             }
