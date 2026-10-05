@@ -1,6 +1,6 @@
 ﻿# LightTodo 项目专属规则
 
-通用规则见：`E:\@imFile-Download\AI-Useful-Prompt\通用开发工作规则.md`。
+本项目继承 Codex 已加载的全局 `AGENTS.md`（本机：`C:\Users\freez\.codex\AGENTS.md`）；以下保留项目专属规则。
 
 - 本项目是 Tauri + Vue 3 + TypeScript 的 Windows 待办桌面应用，Rust/Tauri 代码在 `src-tauri`。
 - 开发命令：`npm run dev`；前端检查/构建：`npm run build`；正式 EXE：获得授权后使用 `npm run build:exe`。
