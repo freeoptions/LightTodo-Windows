@@ -64,9 +64,11 @@ export function useTodos() {
         targetDate: currentViewDate.value || null
       });
       todos.value = buildTodoTree(flatTodos);
+      return true;
     } catch (e) {
       error.value = e as string;
       console.error('Failed to load todos:', e);
+      return false;
     } finally {
       loading.value = false;
     }

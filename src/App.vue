@@ -6,7 +6,9 @@ import DatePicker from './components/DatePicker.vue';
 import LongTermTodos from './components/LongTermTodos.vue';
 import DeadlineReminders from './components/DeadlineReminders.vue';
 import WeekdayPicker from './components/WeekdayPicker.vue';
+import MemoEditor from './components/MemoEditor.vue';
 import { useTodos } from './composables/useTodos';
+import { useLocalDay } from './composables/useLocalDay';
 import { type CycleCompletionMode, type RepeatMode, type TodoItem as TodoItemType } from './types/todo';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -93,6 +95,12 @@ const isSavingMemo = ref(false);
 const viewDate = ref('');
 const showDatePicker = ref(false);
 
+const today = useLocalDay(async (previousDay) => {
+  // A view of the previous "today" follows the calendar; other selected dates stay selected.
+  if (viewDate.value === previousDay) viewDate.value = '';
+  return await loadTodos(viewDate.value);
+});
+
 const currentWindow = getCurrentWindow();
 
 const dateAccentColors = [
@@ -124,7 +132,7 @@ const getDateAccentColor = (isoDate: string) => {
 
 // Format current date
 const currentDate = computed(() => {
-  const now = new Date();
+  const now = new Date(today.value + 'T00:00:00');
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, '0');
   const day = String(now.getDate()).padStart(2, '0');
@@ -254,12 +262,12 @@ const scrollToParentTodo = async (id: string) => {
 
 // Minimum date for date picker (today)
 const minDate = computed(() => {
-  return new Date().toISOString().split('T')[0];
+  return today.value;
 });
 
 // Generate week dates for the picker (starting from Monday of current week)
 const weekDates = computed(() => {
-  const now = new Date();
+  const now = new Date(today.value + 'T00:00:00');
   const currentDay = now.getDay(); // 0 = Sunday, 1 = Monday, ...
   const mondayOffset = currentDay === 0 ? -6 : 1 - currentDay; // Calculate offset to Monday
 
@@ -1104,17 +1112,13 @@ const goToToday = async () => {
         </div>
 
         <!-- Memo section -->
-        <div class="memo-section">
-          <textarea
-            :value="memo"
-            @input="(e) => updateMemo((e.target as HTMLTextAreaElement).value)"
-            @mouseup="updateMemoHeight(($event.target as HTMLTextAreaElement).offsetHeight)"
-            class="memo-textarea"
-            placeholder="在这里记录你的备忘...（支持多行，自动保存）"
-            :style="{ height: memoHeight + 'px' }"
-          ></textarea>
-          <div v-if="isSavingMemo" class="memo-saving">保存中...</div>
-        </div>
+        <MemoEditor
+          :model-value="memo"
+          :height="memoHeight"
+          :saving="isSavingMemo"
+          @update:model-value="updateMemo"
+          @resize="updateMemoHeight"
+        />
 
         <DeadlineReminders />
 
@@ -1821,52 +1825,6 @@ body::-webkit-scrollbar,
 .week-date-day {
   font-size: 16px;
   font-weight: 600;
-}
-
-/* Memo Section Styles */
-.memo-section {
-  position: relative;
-  margin-bottom: 16px;
-}
-
-.memo-textarea {
-  width: 100%;
-  padding: 14px 16px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 14px;
-  font-family: inherit;
-  resize: vertical;
-  min-height: 80px;
-  max-height: 200px;
-  line-height: 1.5;
-  transition: border-color 0.2s, box-shadow 0.2s;
-  box-shadow: 0 8px 20px rgba(23, 33, 43, 0.04);
-}
-
-.memo-textarea:focus {
-  outline: none;
-  border-color: var(--primary-color);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
-}
-
-.memo-textarea::placeholder {
-  color: var(--text-secondary);
-  opacity: 0.7;
-}
-
-.memo-saving {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  padding: 4px 8px;
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: 12px;
-  border-radius: 4px;
-  pointer-events: none;
 }
 
 .app-content {
